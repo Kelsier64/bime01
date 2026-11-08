@@ -1,0 +1,8 @@
+{
+  "name": "aquarium-lab-ui",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "vite build" },
+  "dependencies": { "three": "^0.183.2" },
+  "devDependencies": { "vite": "^7.3.1" }
+}

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#133530">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23133530'/%3E%3Cpath d='M5 17c4 0 4-4 8-4s4 4 8 4 4-4 7-4M5 22c4 0 4-4 8-4s4 4 8 4 4-4 7-4' fill='none' stroke='%2395ebc1' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
+    <title>Aquarium Lab｜智慧養殖監控</title>
+  </head>
+  <body>
+    <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="icon-waves" viewBox="0 0 24 24"><path d="M2 8c2.5 0 2.5-3 5-3s2.5 3 5 3 2.5-3 5-3 2.5 3 5 3M2 13c2.5 0 2.5-3 5-3s2.5 3 5 3 2.5-3 5-3 2.5 3 5 3M2 18c2.5 0 2.5-3 5-3s2.5 3 5 3 2.5-3 5-3 2.5 3 5 3"/></symbol>
+      <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></symbol>
+      <symbol id="icon-sliders" viewBox="0 0 24 24"><path d="M4 6h5m4 0h7M4 12h10m4 0h2M4 18h2m4 0h10M9 4v4m9 2v4m-8 2v4"/></symbol>
+      <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M4 4v16h16M8 14l4-4 3 2 5-6"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></symbol>
+      <symbol id="icon-thermometer" viewBox="0 0 24 24"><path d="M9.5 14.4V5.5a2.5 2.5 0 1 1 5 0v8.9a4.5 4.5 0 1 1-5 0ZM12 10v7m5-10h2m-2 4h2"/></symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24"><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2m0-14-2 2M7 17l-2 2"/><circle cx="12" cy="12" r="4"/></symbol>
+      <symbol id="icon-fish" viewBox="0 0 24 24"><path d="M7 12c3-5 8-5 14 0-6 5-11 5-14 0Zm0 0-4-3v6l4-3Zm9-1h.01"/></symbol>
+      <symbol id="icon-feed" viewBox="0 0 24 24"><path d="M4 12h16l-1.4 5a2 2 0 0 1-1.9 1.5H7.3A2 2 0 0 1 5.4 17L4 12Zm4-4h.01M12 5h.01M16 8h.01"/></symbol>
+      <symbol id="icon-lamp" viewBox="0 0 24 24"><path d="M9 18h6m-5 3h4m-6-7a6 6 0 1 1 8 0c-.7.7-1 1.4-1 2h-6c0-.6-.3-1.3-1-2Z"/></symbol>
+      <symbol id="icon-cube" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3ZM4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+      <symbol id="icon-reset" viewBox="0 0 24 24"><path d="M4 11a8 8 0 1 1 2 6M4 5v6h6"/></symbol>
+      <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 8v5m0 3h.01M10.4 4.8 3.1 17a1.4 1.4 0 0 0 1.2 2.1h15.4a1.4 1.4 0 0 0 1.2-2.1L13.6 4.8a1.8 1.8 0 0 0-3.2 0Z"/></symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></symbol>
+    </svg>
+
+    <a class="skip" href="#overview">跳至主要內容</a>
+    <aside class="rail">
+      <a class="brand" href="#overview">
+        <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#icon-waves"/></svg></span>
+        <span><strong>Aquarium Lab</strong><small>智慧養殖監控</small></span>
+      </a>
+      <nav aria-label="控制台導覽">
+        <span class="nav-caption">工作區</span>
+        <a href="#overview" aria-current="location"><svg class="icon" aria-hidden="true"><use href="#icon-grid"/></svg><span>魚缸總覽</span></a>
+        <a href="#controls"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg><span>設備控制</span></a>
+        <a href="#analysis"><svg class="icon" aria-hidden="true"><use href="#icon-chart"/></svg><span>歷史分析</span></a>
+      </nav>
+      <div class="rail-bottom">
+        <a class="api-link" href="/docs"><span>硬體 API 文件</span><svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></a>
+        <span class="rail-version">AQUARIUM LAB / PHASE 01</span>
+      </div>
+    </aside>
+
+    <main id="overview" tabindex="-1">
+      <div class="topline">
+        <div class="breadcrumb">監控工作區 <span>/</span> <strong>魚缸 01</strong></div>
+        <div class="top-right">
+          <span class="source-tag" id="source">等待資料</span>
+          <span class="connection" id="connection" role="status"><i></i><span>連線中</span></span>
+        </div>
+      </div>
+
+      <div class="intro">
+        <div>
+          <h1>魚缸總覽</h1>
+          <p>即時觀察魚群、追蹤水質變化與管理設備。</p>
+        </div>
+        <div class="species">
+          <span class="species-icon"><svg class="icon" aria-hidden="true"><use href="#icon-fish"/></svg></span>
+          <div><strong>斑馬魚</strong><em>Danio rerio</em></div>
+        </div>
+      </div>
+
+      <section class="metrics" aria-label="即時遙測">
+        <article class="metric temperature">
+          <div class="metric-heading"><span class="metric-icon"><svg class="icon" aria-hidden="true"><use href="#icon-thermometer"/></svg></span><h2>水溫</h2></div>
+          <div class="metric-value"><strong id="temperature">—</strong><span class="unit">°C</span></div>
+          <svg class="sparkline" id="spark-temperature" viewBox="0 0 92 32" aria-hidden="true"></svg>
+        </article>
+        <article class="metric clarity" id="clarity-metric">
+          <div class="metric-heading"><span class="metric-icon"><svg class="icon" aria-hidden="true"><use href="#icon-sun"/></svg></span><h2>透光度</h2></div>
+          <div class="metric-value"><strong id="transmittance">—</strong><span class="unit">%</span></div>
+          <svg class="sparkline" id="spark-transmittance" viewBox="0 0 92 32" aria-hidden="true"></svg>
+        </article>
+        <article class="metric tracking">
+          <div class="metric-heading"><span class="metric-icon"><svg class="icon" aria-hidden="true"><use href="#icon-fish"/></svg></span><h2>有效追蹤</h2></div>
+          <div class="metric-value"><strong id="fish-count">—</strong><span class="unit" id="fish-total">尾</span></div>
+          <div class="track-meter" id="track-meter" aria-hidden="true"><i></i></div>
+        </article>
+      </section>
+
+      <aside id="clarity-alert" class="notice" role="status" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#icon-alert"/></svg>
+        <strong>透光度偏低</strong><span>側面鏡頭可視性可能下降，請檢查缸壁是否需要清理。</span>
+      </aside>
+
+      <div class="workspace">
+        <section class="panel tank-panel" aria-labelledby="tank-title">
+          <div class="panel-header">
+            <div><h2 id="tank-title">3D 魚缸</h2><p>魚群位置與追蹤狀態</p></div>
+            <div class="segmented" id="views" role="group" aria-label="魚缸視角">
+              <button type="button" data-view="orbit" aria-pressed="true">立體</button>
+              <button type="button" data-view="side" aria-pressed="false">側面</button>
+              <button type="button" data-view="top" aria-pressed="false">上方</button>
+            </div>
+          </div>
+          <div id="tank" class="tank">
+            <div class="tank-label" id="tank-status" data-state="stale"><i></i><span>等待魚群資料</span></div>
+            <div class="tank-label feeding-label" id="feeding-label" hidden><i></i>魚群正在追餌</div>
+            <button type="button" class="reset-view" id="reset-view" aria-label="重置視角" title="重置視角">
+              <svg class="icon" aria-hidden="true"><use href="#icon-reset"/></svg>
+            </button>
+            <div id="tank-fallback" class="tank-fallback" hidden>此瀏覽器目前無法啟用 WebGL。</div>
+            <div class="tank-guide" id="tank-guide">拖曳旋轉 · 滾輪縮放</div>
+            <div class="tank-size" id="tank-size"></div>
+          </div>
+          <div class="tank-footer">
+            <div class="legend"><span><i></i>追蹤中</span><span><i></i>追蹤遺失</span><span><i></i>投餌區</span></div>
+            <div class="fish-inspect">
+              <label for="fish-select">個體觀測</label>
+              <select id="fish-select" disabled><option value="">全部魚群</option></select>
+            </div>
+          </div>
+          <div class="fish-detail" id="fish-detail" hidden>
+            <strong id="fish-detail-id"></strong><span id="fish-detail-status"></span>
+            <span id="fish-detail-speed"></span><span id="fish-detail-position"></span>
+          </div>
+        </section>
+
+        <section class="panel controls-panel" id="controls" aria-labelledby="controls-title">
+          <div class="panel-header"><div><h2 id="controls-title">設備控制</h2><p>餵食、照明與模擬情境</p></div></div>
+          <div class="control-block">
+            <div class="control-heading">
+              <span class="device-icon feed-icon"><svg class="icon" aria-hidden="true"><use href="#icon-feed"/></svg></span>
+              <div><h3>自動餵食機</h3><p id="feed-timing">等待設備狀態</p></div>
+              <span class="pill" id="feed-mode">—</span>
+            </div>
+            <button type="button" class="primary" id="feed" disabled>立即餵食</button>
+          </div>
+          <div class="control-block">
+            <div class="control-heading">
+              <span class="device-icon light-icon"><svg class="icon" aria-hidden="true"><use href="#icon-lamp"/></svg></span>
+              <div><h3>魚缸照明</h3><p id="light-status">狀態未知</p></div>
+            </div>
+            <div class="segmented light-options" id="light-options" role="group" aria-label="照明模式">
+              <button type="button" data-light="auto" aria-pressed="false" disabled>自動</button>
+              <button type="button" data-light="on" aria-pressed="false" disabled>開啟</button>
+              <button type="button" data-light="off" aria-pressed="false" disabled>關閉</button>
+            </div>
+          </div>
+          <div class="control-block demo" id="demo" hidden>
+            <div class="demo-heading"><h3>模擬情境</h3><button type="button" data-demo="reset" class="text-button">重跑模擬</button></div>
+            <div class="demo-options">
+              <button type="button" data-demo="lost">追蹤遺失</button>
+              <button type="button" data-demo="clarity" id="clarity-toggle">降低透光</button>
+            </div>
+          </div>
+          <p class="feedback" id="feedback" role="status"></p>
+        </section>
+
+        <section class="panel analysis-panel" id="analysis" aria-labelledby="analysis-title">
+          <div class="panel-header">
+            <div><h2 id="analysis-title">歷史趨勢</h2><p>比較魚群活動與水質遙測</p></div>
+            <div class="segmented" id="ranges" role="group" aria-label="時間範圍">
+              <button type="button" data-range="1m" aria-pressed="true">1 分鐘</button>
+              <button type="button" data-range="15m" aria-pressed="false">15 分鐘</button>
+              <button type="button" data-range="24h" aria-pressed="false">24 小時</button>
+            </div>
+          </div>
+          <div class="chart-body">
+            <div class="chart-controls">
+              <div><label for="metric">指標</label>
+                <select id="metric">
+                  <option value="speed_cm_s">平均游速</option>
+                  <option value="spacing_cm">魚群平均間距</option>
+                  <option value="temperature_c">水溫</option>
+                  <option value="transmittance_pct">透光度</option>
+                </select>
+              </div>
+              <span class="chart-key"><i></i>餵食事件</span>
+            </div>
+            <div class="chart" id="chart"></div>
+            <div class="summary">
+              <div><span>平均游速</span><strong id="avg-speed">—</strong></div>
+              <div><span>低速比例</span><strong id="low-speed">—</strong></div>
+              <div><span>停留最多</span><strong id="favorite-zone">—</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel response-panel" aria-labelledby="response-title">
+          <div class="panel-header"><div><h2 id="response-title">餵食反應</h2><p>比較餵食前後各 15 秒</p></div></div>
+          <div id="response" class="response"></div>
+          <div class="events"><h3>近期設備事件</h3><ul id="events"></ul></div>
+        </section>
+      </div>
+
+      <footer class="footer"><span>AQUARIUM LAB / PHASE 01</span><a href="/docs">硬體 API 文件 <svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></a></footer>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
