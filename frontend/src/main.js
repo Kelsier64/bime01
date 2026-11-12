@@ -1,5 +1,7 @@
 import "./style.css";
+import { createCameraPreview } from "./camera-preview.js";
 import { createTrendChart, displayTime, drawSparkline } from "./charts.js";
+import { createTank } from "./tank-plane.js";
 
 const byId = (id) => document.getElementById(id);
 function text(id, value) {
@@ -11,13 +13,16 @@ const valueWithUnit = (value, unit = "", decimals = 1) =>
   Number.isFinite(value) ? `${value.toFixed(decimals)}${unit ? ` ${unit}` : ""}` : "—";
 const trendChart = createTrendChart(byId("chart"));
 const fishSelect = byId("fish-select");
+const tank = createTank(byId("tank-plane"));
+let cameraView = "idle";
+const camera = createCameraPreview(byId("camera-preview"), byId("camera-live-image"), byId("camera-tracks"), (view) => {
+  cameraView = view;
+  renderState();
+});
 
 let state;
-let tank;
-let tankRequested = false;
 let online = false;
 let pending = false;
-let selectedView = "orbit";
 let selectedRange = "1m";
 let history;
 let historyRequest = 0;
@@ -33,6 +38,9 @@ const sensorCards = [
 function updateControls() {
   const controls = state?.controls;
   const simulation = state?.source === "simulation";
+  const simulationToggle = byId("simulation-toggle");
+  simulationToggle.disabled = !online || !state || pending || state.camera_live || cameraView !== "idle";
+  text("simulation-toggle", simulation ? "關閉模擬" : "開啟模擬");
   const enabled = online && controls?.available && !pending;
   const feedButton = byId("feed");
   feedButton.disabled = !enabled || !controls.can_feed;
@@ -68,7 +76,7 @@ function renderFishSelection(fish, fresh) {
   }
   fishSelect.disabled = !fish.length;
   const selected = fish.find((track) => track.id === fishSelect.value);
-  tank?.selectFish(selected?.id ?? "");
+  tank.update(state, fresh, selected?.id ?? "");
   byId("fish-detail").hidden = !selected;
   if (!selected) return;
 
@@ -79,7 +87,7 @@ function renderFishSelection(fish, fresh) {
   text("fish-detail-speed", `游速 ${valueWithUnit(speed, "cm/s")}`);
   const pos = selected.position;
   const label = tracking ? "座標" : "最後位置";
-  text("fish-detail-position", pos ? `${label} ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)} cm` : `${label} —`);
+  text("fish-detail-position", pos ? `${label} ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)} cm` : `${label} —`);
 }
 
 function renderState() {
@@ -92,49 +100,59 @@ function renderState() {
   byId("clarity-metric").dataset.alert = String(clarityAlert);
   const fresh = online && state?.tracking_fresh;
   const fish = state?.fish ?? [];
+  const simulation = state?.source === "simulation";
+  const live = cameraView === "live";
+  const tracking = live ? camera.tracking : null;
+  const liveCount = tracking?.stage === "tracking" ? tracking.tracks.length : null;
+  const showPlane = cameraView === "idle" && (simulation || fish.length > 0);
   const count = fish.filter((track) => track.status === "tracked").length;
-  text("fish-count", fresh ? count : "—");
-  text("fish-total", fish.length ? `/ ${fish.length} 尾` : "尾");
+  text("fish-count", live ? (liveCount ?? "—") : fresh ? count : "—");
+  text("fish-total", !live && fish.length ? `/ ${fish.length} 尾` : "尾");
   const loss = fresh && count < fish.length;
   const meter = byId("track-meter");
   meter.dataset.loss = String(loss);
-  meter.firstElementChild.style.width = fresh && fish.length ? `${count / fish.length * 100}%` : "0%";
+  meter.firstElementChild.style.width = !live && fresh && fish.length ? `${count / fish.length * 100}%` : "0%";
   const status = byId("tank-status");
-  status.dataset.state = fresh ? (loss ? "loss" : "fresh") : "stale";
-  const statusLabel = fresh ? `${count} 尾追蹤中${loss ? ` · ${fish.length - count} 尾遺失` : ""}`
+  status.hidden = !showPlane && !live;
+  status.dataset.state = live ? "fresh" : fresh ? (loss ? "loss" : "fresh") : "stale";
+  const liveLabel = liveCount !== null ? `${liveCount} 尾即時追蹤`
+    : tracking?.stage === "unavailable" ? "追蹤元件未載入"
+    : tracking?.stage === "invalid_frame" ? "等待有效畫格" : "建立追蹤背景中";
+  const statusLabel = live ? liveLabel
+    : fresh ? `${count} 尾追蹤中${loss ? ` · ${fish.length - count} 尾遺失` : ""}`
     : online ? "等待有效觀測" : state ? "即時連線中斷" : "等待魚群資料";
   if (status.lastElementChild.textContent !== statusLabel) status.lastElementChild.textContent = statusLabel;
   const fedAt = state?.controls.last_feed_ms;
-  byId("feeding-label").hidden = !(online && state?.source === "simulation" && fedAt != null && state.timestamp_ms - fedAt < 14_000);
-  byId("reset-view").disabled = !tank;
-  if (state?.tank) text("tank-size", `${state.tank.width} × ${state.tank.height} × ${state.tank.depth} cm`);
-  if (state) text("source", state.source === "simulation" ? "模擬模式" : "硬體模式");
+  byId("feeding-label").hidden = !(showPlane && online && simulation && fedAt != null && state.timestamp_ms - fedAt < 14_000);
+  byId("tank-plane").hidden = !showPlane;
+  byId("tank-footer").hidden = !showPlane;
+  byId("tank-size").hidden = !showPlane;
+  byId("tank-empty").hidden = showPlane || live;
+  text("tank-empty", cameraView === "starting" ? "正在連接 Pi Zero 2 W 相機…"
+    : !online ? "等待控制台連線"
+    : state?.camera_live ? "相機正在另一個頁面播放"
+    : state?.camera_enabled ? "模擬已關閉，可在下方啟動即時影像" : "模擬已關閉，等待實體設備資料");
+  text("tank-title", cameraView === "idle" ? "2D 魚缸追蹤" : "實體魚缸即時追蹤");
+  text("tank-description", cameraView === "idle" ? "正面視角 · 水平位置與高度" : "Pi Zero 2 W 相機");
+  if (state?.tank) text("tank-size", `${state.tank.width} × ${state.tank.height} cm`);
+  if (state) text("source", simulation ? "模擬模式" : "實體模式");
+  camera.update(Boolean(state?.camera_enabled), online);
   renderFishSelection(fish, fresh);
   updateControls();
 }
 
-async function loadTank() {
-  tankRequested = true;
-  try {
-    const { createTank } = await import("./tank.js");
-    tank = createTank(byId("tank"), state.tank);
-    tank.setView(selectedView);
-    tank.update(state);
-    if (!online) tank.setOffline();
-  } catch (error) {
-    console.warn("Unable to initialize aquarium WebGL", error);
-    byId("tank-fallback").hidden = false;
-    byId("tank-guide").hidden = true;
-    for (const button of document.querySelectorAll("[data-view]")) button.disabled = true;
-  }
-  renderState();
-}
-
 function acceptState(next) {
   if (state && next.timestamp_ms < state.timestamp_ms) return;
+  const runChanged = state?.run_id !== next.run_id;
+  if (state && state.source !== next.source) text("feedback", "");
   state = next;
-  if (!tankRequested) void loadTank();
-  if (online) tank?.update(state);
+  if (runChanged) {
+    ++historyRequest;
+    loadingRange = undefined;
+    history = undefined;
+    renderHistory();
+    void loadHistory();
+  }
   renderState();
 }
 
@@ -143,7 +161,6 @@ function setConnection(connected, label) {
   const indicator = byId("connection");
   indicator.classList.toggle("online", connected);
   indicator.lastElementChild.textContent = label;
-  if (!connected) tank?.setOffline();
   renderState();
 }
 
@@ -153,7 +170,7 @@ function connect() {
   let timeout;
   function startTimeout() {
     clearTimeout(timeout);
-    timeout = setTimeout(() => socket.close(), 5000);
+    timeout = setTimeout(() => socket.close(), 12_000);
   }
   startTimeout();
   socket.addEventListener("message", (event) => {
@@ -171,10 +188,9 @@ function connect() {
 }
 
 function renderHistory() {
-  if (!history) return;
   trendChart.render(history, byId("metric").value);
   for (const [id, metric] of sensorCards) drawSparkline(byId(`spark-${id}`), history, metric);
-  const { summary, feed, events } = history;
+  const { summary = {}, feed, events = [] } = history ?? {};
   text("avg-speed", valueWithUnit(summary.speed_cm_s, "cm/s"));
   text("low-speed", valueWithUnit(summary.low_speed_pct, "%", 0));
   const zones = [
@@ -240,7 +256,7 @@ async function loadHistory() {
     const response = await fetch(`/api/history?range=${selectedRange}`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error("History request failed");
     const result = await response.json();
-    if (requestId !== historyRequest) return;
+    if (requestId !== historyRequest || result.run_id !== state?.run_id) return;
     history = result;
     renderHistory();
   } catch {
@@ -277,17 +293,11 @@ async function command(path, method, body, success) {
   }
 }
 
-for (const button of document.querySelectorAll("[data-view]")) {
-  button.addEventListener("click", () => {
-    selectedView = button.dataset.view;
-    for (const item of document.querySelectorAll("[data-view]")) {
-      item.setAttribute("aria-pressed", String(item === button));
-    }
-    tank?.setView(selectedView);
-  });
-}
-byId("reset-view").addEventListener("click", () => tank?.setView(selectedView));
 fishSelect.addEventListener("change", renderState);
+byId("simulation-toggle").addEventListener("click", () => {
+  const enabled = state?.source !== "simulation";
+  void command("/api/simulation", "PUT", { enabled }, enabled ? "已開啟模擬" : "已關閉模擬");
+});
 for (const button of document.querySelectorAll("[data-range]")) {
   button.addEventListener("click", () => {
     selectedRange = button.dataset.range;

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>魚缸正面追蹤｜Aquarium Lab</title>
+  </head>
+  <body class="replay-body">
+    <main class="replay-page">
+      <a class="replay-link" href="/">← 返回魚缸總覽</a>
+      <div class="intro">
+        <div><h1>魚缸正面追蹤</h1><p>錄影回放 · 2D 像素座標</p></div>
+      </div>
+      <section class="panel" aria-labelledby="replay-title">
+        <div class="panel-header">
+          <div><h2 id="replay-title">2D 軌跡回放</h2><p id="replay-status" role="status">正在讀取追蹤資料…</p></div>
+          <a class="replay-link" href="/api/replay/tracks" download="tracks.csv" id="replay-download" hidden>下載座標 CSV</a>
+        </div>
+        <div class="replay-frame">
+          <video id="replay-video" controls controlslist="nofullscreen noremoteplayback" disablepictureinpicture
+                 playsinline preload="metadata" aria-label="正面魚缸測試影片"></video>
+          <canvas id="replay-overlay" aria-hidden="true"></canvas>
+        </div>
+        <p class="replay-note">圓點是魚的位置，線段是最近一秒的軌跡。遮擋時會中斷軌跡。</p>
+        <p class="replay-note">測試影片來源 <a href="https://motchallenge.net/data/3D-ZeF20/">Pedersen 等人，3D-ZeF20</a> · <a href="https://creativecommons.org/licenses/by-nc-sa/3.0/">CC BY-NC-SA 3.0</a></p>
+      </section>
+    </main>
+    <script type="module" src="/src/replay.js"></script>
+  </body>
+</html>

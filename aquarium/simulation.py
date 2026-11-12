@@ -3,7 +3,6 @@ from math import dist, hypot, sin
 from random import Random
 
 from .contracts import (
-    DEPTH,
     FEED_POINT,
     HEIGHT,
     WIDTH,
@@ -18,14 +17,14 @@ from .contracts import (
 TICK_SECONDS = 0.1
 FEED_SECONDS = 14
 AUTO_FEED_SECONDS = 180
-BOUNDS = ((-WIDTH / 2 + 3, WIDTH / 2 - 3), (3, HEIGHT - 3), (-DEPTH / 2 + 3, DEPTH / 2 - 3))
+BOUNDS = ((-WIDTH / 2 + 3, WIDTH / 2 - 3), (3, HEIGHT - 3))
 
 
 @dataclass
 class Fish:
     position: list[float]
     velocity: list[float]
-    home: tuple[float, float, float]
+    home: tuple[float, float]
     speed: float
     phase: float
     delay: float
@@ -45,9 +44,9 @@ class Simulation:
         self.light_on = True
         self.fish = [
             Fish(
-                position=[random.uniform(-32, 32), random.uniform(10, 29), random.uniform(-12, 12)],
-                velocity=[random.uniform(-7, 7), 0, random.uniform(-4, 4)],
-                home=(random.uniform(-30, 30), random.uniform(8, 19), random.uniform(-13, 13)),
+                position=[random.uniform(-32, 32), random.uniform(10, 29)],
+                velocity=[random.uniform(-7, 7), 0],
+                home=(random.uniform(-30, 30), random.uniform(8, 19)),
                 speed=random.uniform(8, 12),
                 phase=random.uniform(0, 35),
                 delay=random.uniform(0.3, 2.0),
@@ -79,7 +78,7 @@ class Simulation:
                 tracks.append(Track(
                     id=track_id,
                     status="tracked",
-                    position=Position(x=fish.position[0], y=fish.position[1], z=fish.position[2]),
+                    position=Position(x=fish.position[0], y=fish.position[1]),
                 ))
 
         telemetry = Telemetry(
@@ -99,7 +98,6 @@ class Simulation:
             goal = (
                 FEED_POINT[0] + 7 * sin(phase * 1.15),
                 FEED_POINT[1] - 2 + 2 * sin(phase * 0.6),
-                7 * sin(phase * 0.85),
             )
             desired = [(goal[axis] - value) * 1.3 for axis, value in enumerate(position)]
             speed_limit = fish.speed * 2.0
@@ -110,7 +108,6 @@ class Simulation:
             desired = [
                 fish.speed * sin(phase * 0.46),
                 2.4 * sin(phase * 0.75) + (19 - position[1]) * 0.21,
-                fish.speed * 0.72 * sin(phase * 0.57 + 2),
             ]
             speed_limit = fish.speed
 

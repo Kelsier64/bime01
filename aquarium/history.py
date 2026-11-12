@@ -1,6 +1,6 @@
 import sqlite3
 from itertools import combinations
-from math import dist
+from math import dist, hypot
 from pathlib import Path
 
 from .contracts import FEED_POINT, FEED_RADIUS, WIDTH, ObservationFrame, Telemetry
@@ -24,10 +24,10 @@ def measure(frame: ObservationFrame, previous: ObservationFrame | None):
                     (current - old) * 1000 / delta
                     for current, old in zip(positions[track.id], track.position.coordinates())
                 )
-    speeds = [dist(velocity, (0, 0, 0)) for velocity in velocities.values()]
+    speeds = [hypot(*velocity) for velocity in velocities.values()]
     spacing = [dist(left, right) for left, right in combinations(positions.values(), 2)]
     zones = [
-        sum(low <= x < high for x, _, _ in positions.values())
+        sum(low <= x < high for x, _ in positions.values())
         for low, high in ((-WIDTH, -WIDTH / 6), (-WIDTH / 6, WIDTH / 6), (WIDTH / 6, WIDTH))
     ]
     sample = {
@@ -77,7 +77,7 @@ class History:
                     :low_count, :spacing_cm, :near_feed, :left_count, :middle_count, :right_count)
                 ON CONFLICT(source, timestamp_ms) DO NOTHING
             """, {
-                **sample, "source": source, "run_id": run_id, "timestamp_ms": timestamp_ms,
+                **sample, "source": f"{source}:2d", "run_id": run_id, "timestamp_ms": timestamp_ms,
             })
 
     def save_telemetry(self, source, sample: Telemetry):
@@ -106,12 +106,13 @@ class History:
     def read(self, source, run_id, range_name, now_ms):
         span, step = RANGES[range_name]
         start = now_ms - span
+        motion_source = f"{source}:2d"
         motion = self.db.execute("""
             SELECT timestamp_ms / ? AS bucket, SUM(speed_sum) / NULLIF(SUM(speed_count), 0) AS speed_cm_s,
                 AVG(spacing_cm) AS spacing_cm
             FROM motion WHERE source = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
             GROUP BY bucket ORDER BY bucket
-        """, (step, source, start, now_ms))
+        """, (step, motion_source, start, now_ms))
         points = {row["bucket"]: dict(row) for row in motion}
         telemetry = self.db.execute("""
             SELECT timestamp_ms / ? AS bucket, AVG(temperature_c) AS temperature_c,
@@ -133,7 +134,7 @@ class History:
                 SUM(left_count) AS left_count, SUM(middle_count) AS middle_count,
                 SUM(right_count) AS right_count
             FROM motion WHERE source = ? AND timestamp_ms BETWEEN ? AND ?
-        """, (source, start, now_ms)).fetchone()
+        """, (motion_source, start, now_ms)).fetchone()
         events = self.db.execute("""
             SELECT timestamp_ms, action, origin, enabled FROM events
             WHERE source = ? AND timestamp_ms BETWEEN ? AND ? ORDER BY timestamp_ms DESC LIMIT 8

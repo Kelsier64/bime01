@@ -169,7 +169,7 @@ export function createTrendChart(container) {
 }
 
 export function drawSparkline(element, history, metric) {
-  const values = history.series.map((point) => point[metric]).filter(Number.isFinite).slice(-30);
+  const values = (history?.series ?? []).map((point) => point[metric]).filter(Number.isFinite).slice(-30);
   if (values.length < 2) {
     element.replaceChildren();
     return;

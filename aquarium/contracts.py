@@ -2,8 +2,8 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-WIDTH, HEIGHT, DEPTH = 80.0, 40.0, 36.0
-FEED_POINT = (12.0, 34.0, 0.0)
+WIDTH, HEIGHT = 80.0, 40.0
+FEED_POINT = (12.0, 34.0)
 FEED_RADIUS = 15.0
 MIN_TRANSMITTANCE = 60.0
 
@@ -15,10 +15,9 @@ class Message(BaseModel):
 class Position(Message):
     x: float = Field(ge=-WIDTH / 2, le=WIDTH / 2)
     y: float = Field(ge=0, le=HEIGHT)
-    z: float = Field(ge=-DEPTH / 2, le=DEPTH / 2)
 
-    def coordinates(self) -> tuple[float, float, float]:
-        return self.x, self.y, self.z
+    def coordinates(self) -> tuple[float, float]:
+        return self.x, self.y
 
 
 class Track(Message):
