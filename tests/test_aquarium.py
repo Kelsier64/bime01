@@ -1,308 +1,248 @@
 import asyncio
-import subprocess
 import tempfile
 import unittest
-from contextlib import asynccontextmanager
+from math import dist
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from pydantic import ValidationError
 
-from aquarium.contracts import DeviceUnavailable, FeedCommand, LightCommand
+from aquarium.calibration import TankMapper
+from aquarium.devices import ManualFeeder
+from aquarium.fake import FakeTank, default_calibration, default_settings, seed_history
 from aquarium.main import create_app
+from aquarium.monitor import Monitor
+from aquarium.settings import Calibration, Settings, SettingsStore
+from aquarium.store import Store
+
+START_MS = 1_800_000_000_000
 
 
-class TestActuator:
-    def __init__(self):
-        self.commands = []
-        self.available = True
+class Clock:
+    def __init__(self, ms=START_MS):
+        self.ms = ms
 
-    async def execute(self, command):
-        if not self.available:
-            raise DeviceUnavailable()
-        self.commands.append(command)
+    def __call__(self):
+        return self.ms
 
 
-class AquariumTests(unittest.TestCase):
+class Rig:
+    """A monitor fed by the fake tank on a simulated clock."""
+
+    def __init__(self, directory: Path, settings: Settings | None = None, fps=10):
+        self.clock = Clock()
+        self.tank = FakeTank(clock=lambda: self.clock.ms / 1000)
+        self.store = Store(directory / "test.sqlite3")
+        self.settings = SettingsStore(directory / "settings.json", settings or default_settings())
+        self.monitor = Monitor(self.tank, self.store, self.settings, ManualFeeder(self.tank.feed),
+                               directory / "snapshots", clock=self.clock)
+        self.interval = 1000 // fps
+
+    def run(self, seconds, check=None):
+        for _ in range(round(seconds * 1000 / self.interval)):
+            self.clock.ms += self.interval
+            frame = self.tank.next_frame()
+            if frame is not None:
+                self.monitor.process(frame)
+                if check:
+                    check()
+
+    def rows(self, query, *args):
+        return self.store.db.execute(query, args).fetchall()
+
+
+class CalibrationTests(unittest.TestCase):
+    def test_corners_map_to_tank_edges_with_height_upwards(self):
+        calibration = Calibration(
+            corners=((100, 50), (500, 70), (520, 330), (90, 310)),
+            frame_width=640, frame_height=360, tank_width_cm=60, tank_height_cm=30,
+        )
+        mapper = TankMapper(calibration)
+        for corner, expected in zip(calibration.corners, [(0, 30), (60, 30), (60, 0), (0, 0)]):
+            for value, target in zip(mapper.to_cm(*corner, 640, 360), expected):
+                self.assertAlmostEqual(value, target, places=6)
+        x, y = mapper.to_cm(100 / 2, 50 / 2, 320, 180)
+        self.assertAlmostEqual(x, 0, places=6)
+        self.assertAlmostEqual(y, 30, places=6)
+
+    def test_rejects_corners_in_the_wrong_order(self):
+        with self.assertRaises(ValidationError):
+            Calibration(corners=((0, 0), (0, 100), (100, 100), (100, 0)), frame_width=640, frame_height=360,
+                        tank_width_cm=60, tank_height_cm=30)
+
+
+class PipelineTests(unittest.TestCase):
     def setUp(self):
-        self.database = Path(self.enterContext(tempfile.TemporaryDirectory())) / "aquarium.sqlite3"
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def test_simulation_websocket_controls_and_history(self):
-        with TestClient(create_app(database=self.database)) as client, client.websocket_connect("/ws/live") as socket:
-            state = socket.receive_json()
-            if not state["tracking_fresh"]:
+    def rig(self, settings=None):
+        rig = Rig(self.directory, settings)
+        self.addCleanup(rig.store.close)
+        return rig
+
+    def test_tracks_fish_in_centimetres_and_records_speed(self):
+        rig = self.rig()
+        errors = []
+
+        def check():
+            fish = rig.monitor.tracking["tracks"]
+            for track in fish:
+                errors.append(min(dist((track["x_cm"], track["y_cm"]), (f.x, f.y)) for f in rig.tank.fish))
+
+        true_distance = []
+        last = [(f.x, f.y) for f in rig.tank.fish]
+
+        def measure():
+            nonlocal last
+            check()
+            now = [(f.x, f.y) for f in rig.tank.fish]
+            true_distance.append(sum(dist(a, b) for a, b in zip(now, last)))
+            last = now
+
+        rig.run(65, measure)
+        errors.sort()
+        self.assertLess(errors[len(errors) // 2], 1.5, "median error well under a body length")
+        self.assertLess(errors[-1], 8, "even merged blobs stay within a body length")
+        seconds = rig.rows("SELECT * FROM seconds ORDER BY ts")
+        self.assertGreaterEqual(len(seconds), 63)
+        self.assertTrue(all(row["status"] == "lit" for row in seconds))
+        self.assertGreater(sum(row["fish"] == 2 for row in seconds) / len(seconds), 0.8)
+        recorded = [row["speed"] for row in seconds if row["speed"] is not None]
+        true_speed = sum(true_distance) / 65 / 2
+        self.assertAlmostEqual(sum(recorded) / len(recorded), true_speed, delta=true_speed * 0.35)
+        minutes = rig.rows("SELECT * FROM minutes")
+        self.assertEqual(len(minutes), 1)
+        self.assertEqual(minutes[0]["lit"], minutes[0]["seconds"])
+        self.assertIsNotNone(minutes[0]["heat"])
+
+    def test_darkness_pauses_tracking_and_is_excluded(self):
+        rig = self.rig()
+        rig.run(5)
+        rig.tank.demo("dark")
+        rig.run(5)
+        self.assertFalse(rig.monitor.lit)
+        self.assertEqual(rig.monitor.tracking["stage"], "dark")
+        statuses = [row["status"] for row in rig.rows("SELECT status FROM seconds ORDER BY ts")]
+        self.assertEqual(statuses[-3:], ["dark"] * 3)
+        rig.tank.demo("dark")
+        rig.run(3)
+        self.assertTrue(rig.monitor.lit)
+        self.assertEqual(rig.monitor.tracking["stage"], "tracking")
+
+    def test_without_calibration_counts_fish_but_no_speed(self):
+        rig = self.rig(Settings(fish_count=2))
+        rig.run(5)
+        rows = rig.rows("SELECT * FROM seconds")
+        self.assertTrue(all(row["status"] == "uncalibrated" and row["speed"] is None for row in rows))
+        self.assertTrue(any(row["fish"] == 2 for row in rows))
+        self.assertNotIn("x_cm", rig.monitor.tracking["tracks"][0])
+
+    def test_low_activity_raises_and_clears_alert(self):
+        rig = self.rig()
+        seed_history(rig.store, rig.clock.ms // 1000, 2)
+        rig.interval = 500
+        rig.run(4 * 60)
+        self.assertNotIn("low_activity", rig.monitor.alerts.active)
+        rig.tank.demo("sluggish")
+        rig.run(6 * 60)
+        alert = rig.monitor.alerts.active.get("low_activity")
+        self.assertIsNotNone(alert)
+        self.assertIsNotNone(alert["snapshot"])
+        self.assertTrue((self.directory / "snapshots" / alert["snapshot"]).is_file())
+        rig.tank.demo("sluggish")
+        rig.run(6 * 60)
+        self.assertNotIn("low_activity", rig.monitor.alerts.active)
+        kinds = [event["kind"] for event in rig.store.events(0, rig.clock.ms)]
+        self.assertEqual(kinds[:2], ["alert_cleared", "alert"])
+
+    def test_camera_offline_alert_after_timeout(self):
+        rig = self.rig()
+        rig.run(2)
+        monitor = rig.monitor
+        rig.clock.ms += 61_000
+        monitor.alerts.check_camera(rig.clock.ms, monitor.frame_ms, monitor.started_ms, 30)
+        self.assertEqual(monitor.camera_status(rig.clock.ms), "offline")
+        self.assertIn("camera_offline", monitor.alerts.active)
+        closed = monitor.recorder.idle(rig.clock.ms)
+        self.assertEqual(len(closed), 1, "idle flushes the unfinished minute")
+        rig.run(1)
+        self.assertNotIn("camera_offline", monitor.alerts.active)
+
+    def test_feeding_response_compares_before_and_after(self):
+        rig = self.rig()
+        rig.interval = 200
+        rig.run(60)
+
+        asyncio.run(rig.monitor.feed())
+        with self.assertRaises(ValueError):
+            asyncio.run(rig.monitor.feed())
+        rig.run(30)
+        response = rig.monitor.feeding_response()
+        self.assertTrue(response["collecting"])
+        self.assertIsNotNone(response["snapshot"])
+        self.assertGreater(response["after"]["height"], response["before"]["height"] + 5,
+                           "fish rise to the surface after feeding")
+        self.assertGreater(response["before"]["lit_s"], 55)
+
+
+class ApiTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def client(self, source=None, start_monitor=False):
+        app = create_app(source=source or FakeTank(), data_dir=self.directory,
+                         default_settings=default_settings(), start_monitor=start_monitor)
+        return self.enterContext(TestClient(app))
+
+    def test_live_websocket_streams_state_then_frame(self):
+        client = self.client(start_monitor=True)
+        with client.websocket_connect("/ws/live") as socket:
+            for _ in range(20):
                 state = socket.receive_json()
-            self.assertEqual(state["source"], "simulation")
-            self.assertTrue(state["tracking_fresh"])
-            self.assertEqual(len(state["fish"]), 8)
-            self.assertEqual(set(state["fish"][0]["position"]), {"x", "y"})
-            self.assertEqual(len(state["tank"]["feed_point"]), 2)
-            self.assertEqual(client.post("/api/control/feed").status_code, 200)
-            self.assertEqual(client.post("/api/control/feed").status_code, 409)
-            response = client.put("/api/control/light", json={"mode": "off"})
-            self.assertFalse(response.json()["controls"]["light_on"])
-            history = client.get("/api/history").json()
-            self.assertTrue(history["series"])
-            self.assertTrue(history["feed"]["collecting"])
-            self.assertEqual({event["action"] for event in history["events"]}, {"feed", "light"})
+                if state["camera"]["status"] == "live":
+                    break
+            self.assertEqual(state["source"], "fake")
+            self.assertEqual(state["tracking"]["expected"], 2)
+            frame = socket.receive_bytes()
+            self.assertTrue(frame.startswith(b"\xff\xd8"))
+        self.assertEqual(client.get("/api/frame.jpg").headers["content-type"], "image/jpeg")
 
-            reset = client.post("/api/demo", json={"action": "reset"}).json()
-            self.assertNotEqual(reset["run_id"], state["run_id"])
-            history = client.get("/api/history").json()
-            self.assertIsNone(history["feed"])
-            self.assertEqual(len(history["events"]), 2)
+    def test_feed_settings_history_and_demo(self):
+        client = self.client()
+        self.assertIsNone(client.get("/api/feeding").json())
+        response = client.post("/api/feed")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["collecting"])
+        self.assertEqual(client.post("/api/feed").status_code, 409)
+        self.assertEqual(client.post("/api/feed", headers={"Origin": "http://evil.example"}).status_code, 403)
 
-    def test_hardware_ingest_loss_expiry_and_persistence(self):
-        app = create_app(mode="hardware", ingest_token="test-token", database=self.database)
-        headers = {"Authorization": "Bearer test-token"}
-        position = {"x": 5, "y": 10}
-        track = {"id": "fish-1", "status": "tracked", "position": position}
-        with TestClient(app) as client, patch("aquarium.main.now_ms", return_value=1_800_000_000_000) as clock:
-            frame = {"timestamp_ms": clock.return_value, "tracks": [track]}
-            telemetry = {"timestamp_ms": clock.return_value, "temperature_c": 25.5, "transmittance_pct": 54}
-            observations = "/api/ingest/observations"
-            self.assertEqual(client.post(observations, json=frame).status_code, 401)
-            legacy = {**frame, "tracks": [{**track, "position": {**position, "z": 0}}]}
-            self.assertEqual(client.post(observations, json=legacy, headers=headers).status_code, 422)
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 204)
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 409)
-            self.assertEqual(client.post("/api/ingest/telemetry", json=telemetry, headers=headers).status_code, 204)
-            self.assertTrue(client.get("/api/state").json()["clarity_alert"])
+        settings = client.get("/api/settings").json()
+        bad = {**settings, "calibration": {**settings["calibration"], "corners": [[0, 0], [0, 9], [9, 9], [9, 0]]}}
+        self.assertEqual(client.put("/api/settings", json=bad).status_code, 422)
+        moved = {**settings, "calibration": {**settings["calibration"], "tank_width_cm": 45}}
+        self.assertEqual(client.put("/api/settings", json=moved).status_code, 200)
+        self.assertEqual(client.get("/api/state").json()["calibration"]["tank_width_cm"], 45)
+        self.assertEqual(Settings.model_validate_json((self.directory / "settings.json").read_text()).calibration
+                         .tank_width_cm, 45)
 
-            clock.return_value += 1000
-            frame = {"timestamp_ms": clock.return_value, "tracks": [
-                {**track, "status": "lost", "position": {**position, "x": 27}},
-            ]}
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 204)
-            fish = client.get("/api/state").json()["fish"][0]
-            self.assertEqual(fish["status"], "lost")
-            self.assertEqual(fish["position"], position)
-            self.assertIsNone(fish["velocity"])
+        history = client.get("/api/history?range=1h").json()
+        self.assertEqual(history["step_ms"], 60_000)
+        self.assertEqual(len(history["heat"]["counts"]), 72)
+        self.assertEqual({event["kind"] for event in history["events"]}, {"feed", "calibration"})
+        self.assertEqual(client.get("/api/history?range=2h").status_code, 422)
 
-            clock.return_value += 1000
-            frame = {"timestamp_ms": clock.return_value, "tracks": [track]}
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 204)
-            self.assertIsNone(client.get("/api/state").json()["fish"][0]["velocity"])
+        state = client.post("/api/demo", json={"action": "sluggish"}).json()
+        self.assertTrue(state["demo"]["sluggish"])
 
-            clock.return_value += 1000
-            frame = {"timestamp_ms": clock.return_value, "tracks": [
-                {**track, "position": {"x": 8, "y": 14}},
-            ]}
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 204)
-            self.assertEqual(client.get("/api/state").json()["fish"][0]["velocity"], [3.0, 4.0])
+    def test_demo_needs_fake_camera(self):
+        class Camera:
+            name = "picamera"
 
-            clock.return_value += 11_000
-            self.assertEqual(client.post(observations, json=frame, headers=headers).status_code, 422)
-            state = client.get("/api/state").json()
-            self.assertFalse(state["tracking_fresh"])
-            self.assertIsNone(state["telemetry"])
-            self.assertFalse(state["clarity_alert"])
-            self.assertEqual(client.post("/api/control/feed").status_code, 503)
+        client = self.client(source=Camera())
+        self.assertEqual(client.post("/api/demo", json={"action": "dark"}).status_code, 409)
+        self.assertEqual(client.get("/api/state").json()["camera"]["status"], "connecting")
+        self.assertEqual(client.get("/api/snapshots/..%2Fsettings.json").status_code, 404)
 
-        with TestClient(app) as client, patch("aquarium.main.now_ms", return_value=1_800_000_015_000):
-            history = client.get("/api/history?range=24h").json()
-            self.assertEqual(history["summary"]["middle_count"], 3)
-            self.assertEqual(history["summary"]["speed_cm_s"], 5.0)
-            self.assertEqual(history["series"][0]["temperature_c"], 25.5)
 
-    def test_replay_media_and_seek(self):
-        directory = self.database.parent
-        with TestClient(create_app(database=self.database, replay_directory=directory)) as client:
-            video = "/api/replay/video"
-            tracks = "/api/replay/tracks"
-            self.assertEqual(client.get(video).status_code, 404)
-            self.assertEqual(client.get(tracks).status_code, 404)
-            (directory / "front.webm").write_bytes(b"0123456789")
-            (directory / "tracks.csv").write_text("frame,time_s,id,status,x_px,y_px\n1,0,1,tracked,12,24\n")
-            response = client.get(video, headers={"Range": "bytes=2-5"})
-            self.assertEqual(response.status_code, 206)
-            self.assertEqual(response.headers["content-range"], "bytes 2-5/10")
-            self.assertEqual(response.content, b"2345")
-            self.assertIn("1,0,1,tracked,12,24", client.get(tracks).text)
-
-    def test_hardware_controls_require_device_confirmation(self):
-        actuator = TestActuator()
-        app = create_app(mode="hardware", ingest_token="test-token", database=self.database, actuator=actuator)
-        with TestClient(app) as client:
-            actuator.available = False
-            self.assertEqual(client.post("/api/control/feed").status_code, 503)
-            self.assertIsNone(client.get("/api/state").json()["controls"]["last_feed_ms"])
-            self.assertEqual(client.get("/api/history").json()["events"], [])
-
-            actuator.available = True
-            self.assertEqual(client.post("/api/control/feed").status_code, 200)
-            self.assertEqual(client.post("/api/control/feed").status_code, 409)
-            self.assertEqual(client.put("/api/control/light", json={"mode": "on"}).status_code, 200)
-            self.assertEqual(client.put("/api/control/light", json={"mode": "on"}).status_code, 200)
-            self.assertEqual([type(command) for command in actuator.commands], [FeedCommand, LightCommand])
-
-    def test_camera_can_be_disabled(self):
-        with TestClient(create_app(database=self.database)) as client:
-            self.assertFalse(client.get("/api/state").json()["camera_enabled"])
-            self.assertEqual(client.post("/api/camera/snapshot").status_code, 503)
-            with client.websocket_connect("/ws/camera/live") as socket:
-                self.assertEqual(socket.receive_text(), "相機預覽尚未啟用")
-
-    def test_simulation_switch_clears_live_data_and_switches_history(self):
-        app = create_app(database=self.database, ingest_token="test-token")
-        with TestClient(app) as client, client.websocket_connect("/ws/live") as socket:
-            simulated = socket.receive_json()
-            self.assertEqual(simulated["source"], "simulation")
-            self.assertTrue(client.get("/api/history").json()["series"])
-            self.assertEqual(client.put("/api/simulation", json={"enabled": False},
-                                        headers={"Origin": "https://example.com"}).status_code, 403)
-            switched = client.put("/api/simulation", json={"enabled": False}).json()
-            self.assertEqual(switched["source"], "hardware")
-            self.assertNotEqual(switched["run_id"], simulated["run_id"])
-            self.assertEqual(switched["fish"], [])
-            self.assertIsNone(switched["telemetry"])
-            self.assertIsNone(switched["controls"]["next_feed_ms"])
-            self.assertIsNone(switched["controls"]["light_on"])
-            self.assertEqual(client.post("/api/demo", json={"action": "lost"}).status_code, 409)
-            self.assertEqual(client.post("/api/control/feed").status_code, 503)
-            history = client.get("/api/history").json()
-            self.assertEqual(history["source"], "hardware")
-            self.assertEqual(history["series"], [])
-
-            telemetry = {"timestamp_ms": switched["timestamp_ms"], "temperature_c": 24}
-            headers = {"Authorization": "Bearer test-token"}
-            self.assertEqual(client.post("/api/ingest/telemetry", json=telemetry, headers=headers).status_code, 204)
-            self.assertEqual(client.get("/api/state").json()["telemetry"]["temperature_c"], 24)
-            resumed = client.put("/api/simulation", json={"enabled": True}).json()
-            self.assertEqual(resumed["source"], "simulation")
-            self.assertEqual(client.post("/api/ingest/telemetry", json=telemetry, headers=headers).status_code, 409)
-            self.assertEqual(client.get("/api/history").json()["source"], "simulation")
-
-    def test_camera_snapshot_and_timeout(self):
-        jpeg = b"\xff\xd8image\xff\xd9"
-        with TestClient(create_app(database=self.database, camera_enabled=True)) as client:
-            self.assertTrue(client.get("/api/state").json()["camera_enabled"])
-            snapshot = "/api/camera/snapshot"
-            with patch("aquarium.camera.subprocess.run") as capture:
-                capture.return_value = subprocess.CompletedProcess([], 0, jpeg, b"")
-                self.assertEqual(client.post(snapshot, headers={"Origin": "https://example.com"}).status_code, 403)
-                capture.assert_not_called()
-                response = client.post(snapshot, headers={"Origin": "http://testserver"})
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.headers["content-type"], "image/jpeg")
-                self.assertEqual(response.headers["cache-control"], "no-store")
-                self.assertEqual(response.content, jpeg)
-
-                capture.side_effect = [subprocess.TimeoutExpired("rpicam-still", 10), capture.return_value]
-                with self.assertLogs("aquarium.camera", level="WARNING"):
-                    self.assertEqual(client.post(snapshot).status_code, 503)
-                self.assertEqual(client.post(snapshot).status_code, 200)
-
-    def test_camera_live_delivers_frames_and_releases_camera_on_disconnect(self):
-        first = b"\xff\xd8first\xff\xd9"
-        second = b"\xff\xd8second\xff\xd9"
-
-        class CameraProcess:
-            returncode = None
-
-            def __init__(self):
-                self.stdout = self
-                self.chunks = iter((first[:1], first[1:] + second[:-1], second[-1:]))
-
-            async def read(self, _size):
-                chunk = next(self.chunks, None)
-                if chunk is None:
-                    await asyncio.Event().wait()
-                return chunk
-
-            def terminate(self):
-                self.returncode = -15
-
-            async def communicate(self):
-                return b"", None
-
-        process = CameraProcess()
-        spawn = AsyncMock(return_value=process)
-        path = "/ws/camera/live"
-        with (TestClient(create_app(database=self.database, camera_enabled=True)) as client,
-              patch("aquarium.camera.asyncio.create_subprocess_exec", new=spawn),
-              patch("aquarium.camera.subprocess.run") as capture):
-            capture.return_value = subprocess.CompletedProcess([], 0, first, b"")
-            with self.assertRaises(WebSocketDisconnect), client.websocket_connect(
-                path, headers={"Origin": "https://example.com"}
-            ):
-                pass
-            spawn.assert_not_awaited()
-            with client.websocket_connect(path, headers={"Origin": "http://testserver"}) as socket:
-                self.assertEqual(socket.receive_bytes(), first)
-                self.assertEqual(socket.receive_bytes(), second)
-                state = client.get("/api/state").json()
-                self.assertEqual(state["source"], "hardware")
-                self.assertTrue(state["camera_live"])
-                self.assertEqual(state["fish"], [])
-                self.assertIsNone(state["telemetry"])
-                self.assertEqual(client.put("/api/simulation", json={"enabled": True}).status_code, 409)
-                self.assertEqual(client.post("/api/camera/snapshot").status_code, 503)
-                with client.websocket_connect(path) as other:
-                    self.assertIn("相機使用中", other.receive_text())
-                capture.assert_not_called()
-            self.assertEqual(process.returncode, -15)
-            self.assertEqual(client.post("/api/camera/snapshot").content, first)
-            stopped = client.get("/api/state").json()
-            self.assertFalse(stopped["camera_live"])
-            self.assertEqual(stopped["source"], "hardware")
-            self.assertIsNone(stopped["observation_timestamp_ms"])
-
-    def test_live_camera_tracks_jpeg_pixels_and_drops_missing_detections(self):
-        try:
-            import cv2
-            import numpy as np
-            from aquarium.vision import LiveFishTracker
-        except ImportError:
-            self.skipTest("OpenCV and NumPy are required for live tracking")
-
-        def jpeg(x=None):
-            image = np.full((240, 320), 215, dtype=np.uint8)
-            if x is not None:
-                cv2.ellipse(image, (x, 100), (12, 4), 0, 0, 360, 35, -1)
-            return cv2.imencode(".jpg", image)[1].tobytes()
-
-        empty, first, moved = jpeg(), jpeg(120), jpeg(128)
-        large_gold = np.full((240, 320, 3), 215, dtype=np.uint8)
-        cv2.ellipse(large_gold, (220, 110), (42, 22), 0, 0, 360, (12, 141, 232), -1)
-        cv2.rectangle(large_gold, (0, 0), (13, 13), (12, 141, 232), -1)
-        gold_jpeg = cv2.imencode(".jpg", large_gold)[1].tobytes()
-        gold = LiveFishTracker(2, "gold").process(gold_jpeg)
-        self.assertEqual(len(gold["tracks"]), 1)
-        self.assertAlmostEqual(gold["tracks"][0]["x_px"], 220, delta=1)
-
-        @asynccontextmanager
-        async def live():
-            async def frames():
-                for _ in range(60):
-                    yield empty
-                yield first
-                yield moved
-                yield empty
-                await asyncio.Event().wait()
-            yield frames()
-
-        with patch("aquarium.main.RaspberryPiCamera") as camera:
-            camera.return_value.live = live
-            app = create_app(database=self.database, camera_enabled=True)
-            with TestClient(app) as client, client.websocket_connect("/ws/camera/live?fish=1") as socket:
-                for index in range(60):
-                    status = socket.receive_json()
-                    self.assertEqual(socket.receive_bytes(), empty)
-                    self.assertEqual(status["stage"], "learning" if index < 59 else "tracking")
-                    self.assertEqual(status["tracks"], [])
-                initial = socket.receive_json()["tracks"][0]
-                self.assertEqual(socket.receive_bytes(), first)
-                self.assertAlmostEqual(initial["x_px"], 120, delta=1)
-                motion = socket.receive_json()["tracks"][0]
-                self.assertEqual(socket.receive_bytes(), moved)
-                self.assertEqual(initial["id"], motion["id"])
-                self.assertEqual(len(motion["trail"]), 2)
-                self.assertAlmostEqual(motion["x_px"], 128, delta=1)
-                self.assertEqual(socket.receive_json()["tracks"], [])
-                self.assertEqual(socket.receive_bytes(), empty)
-                state = client.get("/api/state").json()
-                self.assertEqual(state["source"], "hardware")
-                self.assertEqual(state["camera_tracking"]["tracks"], [])
-                self.assertIsNone(state["telemetry"])
+if __name__ == "__main__":
+    unittest.main()

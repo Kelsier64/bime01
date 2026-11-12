@@ -1,12 +1,15 @@
 [project]
 name = "aquarium-lab"
-version = "0.1.0"
-description = "Simulated aquarium, telemetry, and tracking dashboard"
+version = "0.2.0"
+description = "2D goldfish tracking and behaviour monitoring on a Raspberry Pi"
 requires-python = ">=3.11"
-dependencies = ["anyio>=4,<5", "fastapi>=0.115,<1", "pydantic>=2.10,<3", "uvicorn>=0.34,<1", "websockets>=14,<17"]
+dependencies = ["fastapi>=0.115,<1", "pydantic>=2.10,<3", "uvicorn>=0.34,<1", "websockets>=14,<17"]
 
 [tool.uv]
 package = false
+default-groups = ["dev", "vision"]
 
 [dependency-groups]
 dev = ["httpx>=0.28,<1"]
+# On the Pi, use the system python3-opencv and python3-numpy instead (see README).
+vision = ["numpy>=1.24", "opencv-python-headless>=4.8"]

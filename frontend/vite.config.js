@@ -1,13 +1,11 @@
-import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
+// `npm run dev` proxies the API to a backend on port 8000.
 export default defineConfig({
-  build: {
-    rollupOptions: {
-      input: {
-        dashboard: fileURLToPath(new URL("index.html", import.meta.url)),
-        replay: fileURLToPath(new URL("replay.html", import.meta.url)),
-      },
+  server: {
+    proxy: {
+      "/api": "http://127.0.0.1:8000",
+      "/ws": { target: "ws://127.0.0.1:8000", ws: true },
     },
   },
 });

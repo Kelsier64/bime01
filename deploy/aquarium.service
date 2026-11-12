@@ -1,0 +1,16 @@
+# Copy to /etc/systemd/system/aquarium.service, change User and paths, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now aquarium
+[Unit]
+Description=Aquarium Lab monitor
+After=network.target
+
+[Service]
+User=kelsier
+WorkingDirectory=/home/kelsier/bime01
+Environment=AQUARIUM_SOURCE=picamera
+ExecStart=/home/kelsier/bime01/.venv/bin/python -m uvicorn aquarium.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

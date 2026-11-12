@@ -1,182 +1,148 @@
-const metrics = {
-  speed_cm_s: { label: "平均游速", unit: "cm/s", padding: 2 },
-  spacing_cm: { label: "魚群平均間距", unit: "cm", padding: 4 },
-  temperature_c: { label: "水溫", unit: "°C", padding: 0.1 },
-  transmittance_pct: { label: "透光度", unit: "%", padding: 2 },
-};
-const shortTime = new Intl.DateTimeFormat("zh-TW", {
-  timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-});
-const exactTime = new Intl.DateTimeFormat("zh-TW", {
-  timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-});
-const dateTime = new Intl.DateTimeFormat("zh-TW", {
-  timeZone: "Asia/Taipei", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-});
+// History trend chart (SVG) and position heatmap (canvas).
 
-export function displayTime(timestamp) {
-  return exactTime.format(timestamp);
+export const METRICS = {
+  speed: { label: "平均游速", unit: "cm/s", scale: 1, digits: 1 },
+  moving: { label: "活動比例", unit: "%", scale: 100, digits: 0 },
+  height: { label: "平均高度", unit: "cm", scale: 1, digits: 1 },
+  fish: { label: "可見魚數", unit: "尾", scale: 1, digits: 1 },
+  lit_ratio: { label: "光照比例", unit: "%", scale: 100, digits: 0 },
+};
+
+const clock = new Intl.DateTimeFormat("zh-TW", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const dayClock = new Intl.DateTimeFormat("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const day = new Intl.DateTimeFormat("zh-TW", { month: "numeric", day: "numeric" });
+
+export const formatDateTime = (ms) => dayClock.format(ms);
+
+export function formatValue(value, metric) {
+  const { scale, digits, unit } = METRICS[metric];
+  return Number.isFinite(value) ? `${(value * scale).toFixed(digits)} ${unit}` : "—";
 }
 
 export function createTrendChart(container) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("aria-hidden", "true");
   const empty = document.createElement("p");
+  empty.className = "chart-empty";
   const tooltip = document.createElement("div");
   tooltip.className = "chart-tooltip";
-  tooltip.setAttribute("role", "status");
   tooltip.hidden = true;
   container.append(svg, empty, tooltip);
+  const left = 44;
+  const right = 12;
+  const top = 16;
+  const bottom = 170;
+  let view = null;
 
-  const left = 43;
-  const right = 13;
-  const top = 22;
-  const bottom = 154;
-  let points = [];
-  let activeTime = null;
-  let currentMetric;
-  let currentStep;
-  let chart;
-
-  function nearestIndex(time) {
-    return points.reduce((nearest, point, index) =>
-      Math.abs(point.timestamp_ms - time) < Math.abs(points[nearest].timestamp_ms - time) ? index : nearest, 0);
-  }
-
-  function select(index) {
-    const point = points[index];
-    const cursor = svg.querySelector(".chart-cursor");
-    if (!point || !cursor) return;
-    activeTime = point.timestamp_ms;
-    const x = chart.x(activeTime);
-    cursor.removeAttribute("display");
-    cursor.setAttribute("transform", `translate(${x} 0)`);
-    cursor.lastElementChild.setAttribute("cy", chart.y(point[currentMetric]));
-    const value = `${chart.clock(activeTime)}　${point[currentMetric].toFixed(2)} ${metrics[currentMetric].unit}`;
-    if (tooltip.textContent !== value) tooltip.textContent = value;
-    tooltip.hidden = false;
-    tooltip.style.left = `${Math.max(5, Math.min(x + 9, chart.width - tooltip.offsetWidth - 5))}px`;
-  }
-
-  function clearSelection() {
-    activeTime = null;
-    tooltip.hidden = true;
-    svg.querySelector(".chart-cursor")?.setAttribute("display", "none");
-  }
-
-  function selectAtPointer(event) {
-    if (!points.length || !chart) return;
-    const rect = svg.getBoundingClientRect();
-    const x = (event.clientX - rect.left) / rect.width * chart.width;
-    if (x < left || x > chart.width - right) {
-      clearSelection();
-      return;
-    }
-    const time = chart.start + (x - left) / (chart.width - left - right) * chart.span;
-    select(nearestIndex(time));
-  }
-
-  container.addEventListener("pointerdown", selectAtPointer);
   container.addEventListener("pointermove", (event) => {
-    if (event.pointerType === "mouse") selectAtPointer(event);
+    if (!view?.points.length) return;
+    const rect = svg.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width * view.width;
+    const time = view.start + (x - left) / (view.width - left - right) * view.span;
+    const point = view.points.reduce((best, item) =>
+      Math.abs(item.ts_ms - time) < Math.abs(best.ts_ms - time) ? item : best);
+    tooltip.textContent = `${dayClock.format(point.ts_ms)}　${formatValue(point[view.metric], view.metric)}`;
+    tooltip.hidden = false;
+    const px = view.x(point.ts_ms) / view.width * rect.width;
+    tooltip.style.left = `${Math.max(4, Math.min(px + 8, rect.width - tooltip.offsetWidth - 4))}px`;
+    const cursor = svg.querySelector(".cursor");
+    cursor.setAttribute("transform", `translate(${view.x(point.ts_ms)} 0)`);
+    cursor.removeAttribute("display");
+    cursor.querySelector("circle").setAttribute("cy", view.y(point[view.metric] * METRICS[view.metric].scale));
   });
-  container.addEventListener("pointerleave", (event) => {
-    if (event.pointerType === "mouse") clearSelection();
-  });
-  container.addEventListener("blur", clearSelection);
-  container.addEventListener("keydown", (event) => {
-    if (!points.length) return;
-    if (event.key === "Escape") {
-      clearSelection();
-      return;
-    }
-    const direction = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
-    if (!direction) return;
-    event.preventDefault();
-    const index = activeTime === null ? points.length - 1 : nearestIndex(activeTime) + direction;
-    select(Math.max(0, Math.min(points.length - 1, index)));
+  container.addEventListener("pointerleave", () => {
+    tooltip.hidden = true;
+    svg.querySelector(".cursor")?.setAttribute("display", "none");
   });
 
   function render(history, metric, message = "正在讀取歷史資料…") {
-    if (metric !== currentMetric || history?.step_ms !== currentStep) clearSelection();
-    currentMetric = metric;
-    currentStep = history?.step_ms;
-    points = history?.series.filter((point) => Number.isFinite(point[metric])) ?? [];
-    const { label, unit, padding } = metrics[metric];
+    const { scale, unit } = METRICS[metric];
+    const points = (history?.series ?? []).filter((point) => Number.isFinite(point[metric]));
     svg.toggleAttribute("hidden", !points.length);
     empty.hidden = Boolean(points.length);
+    tooltip.hidden = true;
     if (!points.length) {
-      empty.textContent = history ? "這段時間尚無有效觀測" : message;
-      container.removeAttribute("tabindex");
-      container.removeAttribute("aria-label");
-      clearSelection();
+      empty.textContent = history ? "這段時間沒有有效觀測" : message;
+      view = null;
       return;
     }
-
-    container.tabIndex = 0;
-    container.setAttribute("role", "group");
-    container.setAttribute("aria-label", `${label}歷史趨勢，使用左右方向鍵查看資料點`);
-    const width = Math.max(220, container.clientWidth);
+    const width = Math.max(260, container.clientWidth);
     const start = history.start_ms;
     const span = history.end_ms - start;
+    const step = history.step_ms;
     const x = (time) => left + (time - start) / span * (width - left - right);
-    const values = points.map((point) => point[metric]);
-    const min = Math.max(0, Math.min(...values) - padding);
-    const max = Math.max(...values) + padding;
+    const values = points.map((point) => point[metric] * scale);
+    const max = Math.max(...values, metric === "fish" ? 1 : 0) * 1.1 || 1;
+    const min = 0;
     const y = (value) => top + (max - value) / (max - min) * (bottom - top);
-    chart = { x, y, width, start, span, clock: currentStep === 900_000 ? dateTime.format : exactTime.format };
+    view = { points, metric, x, y, width, start, span };
 
-    const grid = Array.from({ length: 4 }, (_, index) => {
+    const grid = [0, 1, 2, 3].map((index) => {
       const value = max - (max - min) * index / 3;
-      const row = y(value);
-      return `<line x1="${left}" x2="${width - right}" y1="${row}" y2="${row}" stroke="#dce9e0"/>
-        <text x="${left - 7}" y="${row + 4}" text-anchor="end">${value.toFixed(1)}</text>`;
+      return `<line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" class="grid"/>
+        <text x="${left - 6}" y="${y(value) + 4}" text-anchor="end">${value.toFixed(value < 10 ? 1 : 0)}</text>`;
     }).join("");
-    const clock = currentStep === 1000 ? exactTime : currentStep === 900_000 ? dateTime : shortTime;
-    const labels = ["start", "middle", "end"].map((anchor, index) => {
-      const time = start + span * index / 2;
-      return `<text x="${x(time)}" y="173" text-anchor="${anchor}">${clock.format(time)}</text>`;
+    const format = span <= 90_000_000 ? clock : day;
+    const labels = [0, 0.5, 1].map((fraction, index) => {
+      const time = start + span * fraction;
+      return `<text x="${x(time)}" y="${bottom + 18}" text-anchor="${["start", "middle", "end"][index]}">${format.format(time)}</text>`;
     }).join("");
     const segments = [];
     for (const point of points) {
       const last = segments.at(-1)?.at(-1);
-      if (!last || point.timestamp_ms - last.timestamp_ms > currentStep * 1.65) segments.push([]);
+      if (!last || point.ts_ms - last.ts_ms > step * 1.5) segments.push([]);
       segments.at(-1).push(point);
     }
     const traces = segments.map((segment) => {
-      const coordinates = segment.map((point) => `${x(point.timestamp_ms).toFixed(2)},${y(point[metric]).toFixed(2)}`);
-      const first = x(segment[0].timestamp_ms);
-      const last = x(segment.at(-1).timestamp_ms);
-      return `<path d="M${first},${bottom} L${coordinates.join(" L")} L${last},${bottom} Z" fill="url(#trend-fill)"/>
-        <polyline points="${coordinates.join(" ")}" fill="none" stroke="#21845c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="${last}" cy="${y(segment.at(-1)[metric])}" r="2.5" fill="#21845c"/>`;
+      const coords = segment.map((point) => `${x(point.ts_ms + step / 2).toFixed(1)},${y(point[metric] * scale).toFixed(1)}`);
+      if (coords.length === 1) {
+        const [cx, cy] = coords[0].split(",");
+        return `<circle cx="${cx}" cy="${cy}" r="2.5" class="trace-dot"/>`;
+      }
+      const first = x(segment[0].ts_ms + step / 2);
+      const lastX = x(segment.at(-1).ts_ms + step / 2);
+      return `<path d="M${first},${bottom} L${coords.join(" L")} L${lastX},${bottom} Z" class="area"/>
+        <polyline points="${coords.join(" ")}" class="trace"/>`;
     }).join("");
-    const feeds = new Set(history.events.filter((event) => event.action === "feed").map((event) => event.timestamp_ms));
-    if (history.feed) feeds.add(history.feed.timestamp_ms);
-    const markers = [...feeds].filter((time) => time >= start && time <= history.end_ms).map((time) =>
-      `<line x1="${x(time)}" x2="${x(time)}" y1="${top}" y2="${bottom}" stroke="#af792d" stroke-dasharray="4 3"><title>餵食 ${displayTime(time)}</title></line>`).join("");
-    svg.setAttribute("viewBox", `0 0 ${width} 184`);
-    svg.innerHTML = `<defs><linearGradient id="trend-fill" x2="0%" y2="100%"><stop stop-color="#a0d7b5" stop-opacity=".66"/><stop offset="1" stop-color="#e7f4e9" stop-opacity=".18"/></linearGradient></defs>
-      <g fill="#526b5f" font-family="monospace" font-size="10">${grid}${labels}<text x="3" y="12">${unit}</text></g>
-      ${traces}${markers}<g class="chart-cursor" display="none">
-        <line y1="${top}" y2="${bottom}" stroke="#579176" stroke-dasharray="3 3"/>
-        <circle r="4" fill="#196849" stroke="white" stroke-width="1.4"/>
-      </g>`;
-    if (activeTime !== null) select(nearestIndex(activeTime));
+    const feeds = (history.events ?? []).filter((event) => event.kind === "feed")
+      .map((event) => `<line x1="${x(event.ts_ms)}" x2="${x(event.ts_ms)}" y1="${top}" y2="${bottom}" class="feed-marker"><title>餵食 ${dayClock.format(event.ts_ms)}</title></line>`)
+      .join("");
+    const alerts = (history.events ?? []).filter((event) => event.kind === "alert")
+      .map((event) => `<line x1="${x(event.ts_ms)}" x2="${x(event.ts_ms)}" y1="${top}" y2="${bottom}" class="alert-marker"><title>${event.detail.message ?? "警示"}</title></line>`)
+      .join("");
+    svg.setAttribute("viewBox", `0 0 ${width} ${bottom + 26}`);
+    svg.innerHTML = `<g class="axis">${grid}${labels}<text x="2" y="11">${unit}</text></g>${traces}${feeds}${alerts}
+      <g class="cursor" display="none"><line y1="${top}" y2="${bottom}"/><circle r="4"/></g>`;
   }
 
   return { render };
 }
 
-export function drawSparkline(element, history, metric) {
-  const values = (history?.series ?? []).map((point) => point[metric]).filter(Number.isFinite).slice(-30);
-  if (values.length < 2) {
-    element.replaceChildren();
-    return;
+export function drawHeatmap(canvas, heat) {
+  const context = canvas.getContext("2d");
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#eef4f0";
+  context.fillRect(0, 0, width, height);
+  if (!heat) return;
+  const { columns, rows, counts } = heat;
+  const max = Math.max(...counts);
+  const cellWidth = width / columns;
+  const cellHeight = height / rows;
+  counts.forEach((count, index) => {
+    if (!count) return;
+    const level = count / max;
+    context.fillStyle = `rgba(214, 112, 26, ${0.08 + level * 0.85})`;
+    context.fillRect((index % columns) * cellWidth + 1, Math.floor(index / columns) * cellHeight + 1, cellWidth - 2, cellHeight - 2);
+  });
+  if (!max) {
+    context.fillStyle = "#6b8077";
+    context.font = "13px system-ui, sans-serif";
+    context.textAlign = "center";
+    context.fillText("尚無位置資料", width / 2, height / 2);
   }
-  const min = Math.min(...values);
-  const span = Math.max(Math.max(...values) - min, metrics[metric].padding * 2);
-  const coordinates = values.map((value, index) => `${index / (values.length - 1) * 91},${24 - (value - min) / span * 18}`);
-  element.innerHTML = `<polygon points="0,31 ${coordinates.join(" ")} 91,31" fill="currentColor" opacity=".10"/>
-    <polyline points="${coordinates.join(" ")}" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/>`;
 }
