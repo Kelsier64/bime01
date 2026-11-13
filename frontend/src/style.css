@@ -156,3 +156,13 @@ dialog small { color: var(--muted); }
 .upload { display: inline-block; margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--green); cursor: pointer; }
 .upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .upload:focus-within { outline: 2px solid #278d69; outline-offset: 2px; border-radius: 4px; }
+
+.danger { border: 1px solid #f2c3bd; background: var(--bad-bg); color: var(--bad); font-weight: 600; }
+.danger:hover:not(:disabled) { background: #f9d9d4; }
+.power-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.power-row small { color: var(--muted); }
+.powered-off { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px;
+  background: #0f2a22e6; color: #e9f7f0; text-align: center; }
+.powered-off[hidden] { display: none; }
+.powered-off > div { max-width: 460px; }
+.powered-off code { background: #ffffff1f; padding: 1px 6px; border-radius: 4px; }

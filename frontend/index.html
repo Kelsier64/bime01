@@ -161,6 +161,13 @@
           <legend>餵食</legend>
           <label>前後比較區間（分鐘） <input type="number" name="feed_window_min" min="1" max="60" required></label>
         </fieldset>
+        <fieldset>
+          <legend>系統</legend>
+          <div class="power-row">
+            <button type="button" class="danger" id="shutdown">關閉 Raspberry Pi</button>
+            <small>直接拔電可能損壞 SD 卡，請先在這裡關機。</small>
+          </div>
+        </fieldset>
         <p class="feedback" id="settings-feedback" role="status"></p>
         <div class="button-row">
           <button type="button" class="ghost" id="settings-cancel">取消</button>
@@ -168,6 +175,13 @@
         </div>
       </form>
     </dialog>
+    <div class="powered-off" id="powered-off" hidden>
+      <div>
+        <h2>Raspberry Pi 正在關機</h2>
+        <p>等 Pi 上的綠色燈停止閃爍、熄滅（約 20 秒）後，再拔掉電源。</p>
+        <p>要再使用時插回電源，等約 1 分鐘開機，然後在筆電執行 <code>bash tools/deploy_pi.sh</code>。</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

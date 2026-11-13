@@ -123,6 +123,8 @@ ssh -N -L 8000:127.0.0.1:8000 kelsier@raspberrypi.local
 
    啟用後部署腳本會改用 `systemctl restart`。
 
+**關機**：控制台「設定」最下面有「關閉 Raspberry Pi」。按下並確認後，等綠燈熄滅再拔電源；直接拔電可能損壞 SD 卡。關機後程式不會自己回來，重新插電開機後再執行一次 `tools/deploy_pi.sh`。
+
 **時鐘**：Pi Zero 沒有電池時鐘，只接 USB 時也無法自動對時，重開機後時間常常會錯，歷史資料的時間軸就會跟著錯。控制台偵測到 Pi 與筆電相差超過 2 分鐘時會顯示「時鐘不準」，按「用這台電腦的時間校正」即可（用 `sudo date` 設定，需要免密碼 sudo，Raspberry Pi OS 預設就是）。
 
 **對焦**：Camera 3 預設連續自動對焦。魚缸距離固定時，可在 service 加 `Environment=AQUARIUM_RPICAM_ARGS=--autofocus-mode manual --lens-position 3` 固定焦距（數值約為 1 / 距離公尺數）。
@@ -168,6 +170,7 @@ ssh -N -L 8000:127.0.0.1:8000 kelsier@raspberrypi.local
 | `GET/PUT /api/settings` | 設定與校正 |
 | `GET /api/events` | 事件紀錄 |
 | `GET /api/sources`、`PUT /api/source` | 列出 / 切換影像來源（`{"id": "picamera"}`） |
+| `POST /api/shutdown` | 關閉 Raspberry Pi（`sudo shutdown -h now`，需要免密碼 sudo） |
 | `POST /api/clock` | 用控制台電腦的時間校正 Pi 系統時鐘（相差超過 30 秒才會調整） |
 | `PUT /api/videos/{檔名}` | 上傳測試影片（請求內容就是影片檔） |
 | `POST /api/demo` | 假相機情境：`dark`、`sluggish`、`offline`、`reset` |

@@ -291,6 +291,7 @@ const EVENT_LABELS = {
   feed: (event) => event.detail.origin === "manual" ? "手動餵食" : "餵食器餵食",
   alert: (event) => `警示：${ALERT_NAMES[event.detail.alert] ?? event.detail.alert}`,
   alert_cleared: (event) => `解除：${ALERT_NAMES[event.detail.alert] ?? event.detail.alert}（${Math.round(event.detail.duration_s / 60)} 分鐘）`,
+  shutdown: () => "從控制台關閉 Pi",
   clock: (event) => `校正 Pi 時鐘（原本${describeSkew(-event.detail.skew_ms)}）`,
   calibration: (event) => `重新校正（${event.detail.tank_width_cm ?? "—"} × ${event.detail.tank_height_cm ?? "—"} cm）`,
 };
@@ -508,6 +509,22 @@ form.addEventListener("submit", async (event) => {
     dialog.close();
   } catch (error) {
     setText($("settings-feedback"), error.message === "指令失敗" ? "有欄位超出允許範圍" : error.message);
+  }
+});
+
+$("shutdown").addEventListener("click", async () => {
+  if (!confirm("確定要關閉 Raspberry Pi？\n關機後監測會停止，要重新開機並部署才會恢復。")) return;
+  const button = $("shutdown");
+  const feedback = $("settings-feedback");
+  button.disabled = true;
+  try {
+    await getJson("/api/shutdown", { method: "POST" });
+    dialog.close();
+    $("powered-off").hidden = false;
+  } catch (error) {
+    feedback.dataset.error = "true";
+    setText(feedback, error.message);
+    button.disabled = false;
   }
 });
 

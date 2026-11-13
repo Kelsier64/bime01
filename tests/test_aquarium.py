@@ -319,6 +319,17 @@ class ApiTests(unittest.TestCase):
         setter.assert_awaited_once()
         self.assertEqual(client.get("/api/events").json()[0]["kind"], "clock")
 
+    def test_shutdown_logs_event_and_reports_failure(self):
+        client = self.client()
+        with patch("aquarium.main.power_off", return_value="沒有權限"):
+            self.assertEqual(client.post("/api/shutdown").status_code, 409)
+        self.assertNotIn("shutdown", [event["kind"] for event in client.get("/api/events").json()])
+        with patch("aquarium.main.power_off", return_value=None) as power:
+            self.assertEqual(client.post("/api/shutdown").json(), {"shutting_down": True})
+        power.assert_awaited_once()
+        self.assertEqual(client.get("/api/events").json()[0]["kind"], "shutdown")
+        self.assertEqual(client.post("/api/shutdown", headers={"Origin": "http://evil.example"}).status_code, 403)
+
     def test_falls_back_when_preferred_camera_is_missing(self):
         client = self.client(fake=True, preferred="picamera")
         self.assertEqual(client.get("/api/state").json()["source"], "fake")

@@ -65,6 +65,23 @@ async def set_system_clock(now_ms: int) -> str | None:
     return None
 
 
+async def power_off() -> str | None:
+    """Shut the Pi down cleanly (unplugging a running Pi can corrupt the SD card)."""
+    if os.name != "posix":
+        return "只能在 Raspberry Pi 上關機"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "shutdown", "-h", "now",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, error = await asyncio.wait_for(process.communicate(), 10)
+    except (OSError, TimeoutError) as error:
+        return f"無法執行 shutdown：{error}"
+    if process.returncode:
+        return "沒有權限關機（需要免密碼 sudo）：" + error.decode(errors="replace").strip()
+    return None
+
+
 class DemoAction(Model):
     action: Literal["dark", "sluggish", "offline", "reset"]
 
@@ -115,6 +132,16 @@ def create_app(
         current.clock_changed()
         current.store.add_event(current.clock(), "clock", {"skew_ms": skew})
         return {"adjusted": True, "skew_ms": skew}
+
+    @app.post("/api/shutdown", dependencies=write)
+    async def shutdown():
+        """Power the Pi off. The server stops with it; recording resumes after the next deploy."""
+        current = monitor()
+        problem = await power_off()
+        if problem:
+            raise HTTPException(409, problem)
+        current.store.add_event(current.clock(), "shutdown", {})
+        return {"shutting_down": True}
 
     @app.get("/api/sources")
     async def sources():
