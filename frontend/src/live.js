@@ -98,6 +98,11 @@ export function createLiveView({ frame, overlay, message, stage }) {
   });
 
   return {
+    reset() {
+      frame.hidden = true;
+      frameState = null;
+      context.clearRect(0, 0, overlay.width, overlay.height);
+    },
     showFrame(blob, state) {
       frameState = state;
       const previous = objectUrl;

@@ -1,19 +1,24 @@
 import asyncio
 import tempfile
 import unittest
+from unittest.mock import patch
 from math import dist
 from pathlib import Path
 
+import cv2
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from aquarium.calibration import TankMapper
 from aquarium.devices import ManualFeeder
 from aquarium.fake import FakeTank, default_calibration, default_settings, seed_history
+from aquarium.hub import Catalog
 from aquarium.main import create_app
 from aquarium.monitor import Monitor
 from aquarium.settings import Calibration, Settings, SettingsStore
+from aquarium.sources import VideoFile
 from aquarium.store import Store
+from aquarium.vision import decode
 
 START_MS = 1_800_000_000_000
 
@@ -35,7 +40,7 @@ class Rig:
         self.store = Store(directory / "test.sqlite3")
         self.settings = SettingsStore(directory / "settings.json", settings or default_settings())
         self.monitor = Monitor(self.tank, self.store, self.settings, ManualFeeder(self.tank.feed),
-                               directory / "snapshots", clock=self.clock)
+                               directory / "snapshots", clock=self.clock, monotonic=lambda: self.clock.ms / 1000)
         self.interval = 1000 // fps
 
     def run(self, seconds, check=None):
@@ -160,13 +165,25 @@ class PipelineTests(unittest.TestCase):
         rig.run(2)
         monitor = rig.monitor
         rig.clock.ms += 61_000
-        monitor.alerts.check_camera(rig.clock.ms, monitor.frame_ms, monitor.started_ms, 30)
-        self.assertEqual(monitor.camera_status(rig.clock.ms), "offline")
+        minutes_before = len(rig.rows("SELECT * FROM minutes"))
+        monitor.watchdog_tick()
+        self.assertEqual(monitor.camera_status(), "offline")
         self.assertIn("camera_offline", monitor.alerts.active)
-        closed = monitor.recorder.idle(rig.clock.ms)
-        self.assertEqual(len(closed), 1, "idle flushes the unfinished minute")
+        self.assertEqual(len(rig.rows("SELECT * FROM minutes")), minutes_before + 1, "idle flushes the unfinished minute")
         rig.run(1)
         self.assertNotIn("camera_offline", monitor.alerts.active)
+
+    def test_wall_clock_jump_is_not_a_camera_outage(self):
+        rig = self.rig()
+        monotonic = rig.clock.ms / 1000
+        rig.monitor.monotonic = lambda: monotonic
+        rig.run(2)
+        monotonic += 0.5
+        rig.clock.ms += 130 * 86_400_000
+        rig.monitor.clock_changed()
+        rig.monitor.watchdog_tick()
+        self.assertEqual(rig.monitor.alerts.active, {})
+        self.assertEqual(rig.monitor.camera_status(), "live")
 
     def test_feeding_response_compares_before_and_after(self):
         rig = self.rig()
@@ -185,13 +202,45 @@ class PipelineTests(unittest.TestCase):
         self.assertGreater(response["before"]["lit_s"], 55)
 
 
+def write_test_video(path: Path, seconds=3, fps=10):
+    """A short goldfish clip rendered by the fake tank."""
+    clock = Clock(0)
+    tank = FakeTank(clock=lambda: clock.ms / 1000)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (640, 360))
+    for _ in range(seconds * fps):
+        clock.ms += 1000 // fps
+        writer.write(decode(tank.next_frame()))
+    writer.release()
+
+
+class VideoSourceTests(unittest.TestCase):
+    def test_plays_in_real_time_and_marks_the_loop(self):
+        path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "clip.avi"
+        write_test_video(path, seconds=1)
+        source = VideoFile(path, max_width=320)
+
+        async def collect():
+            items = []
+            async with source.frames() as frames:
+                async for item in frames:
+                    items.append(item)
+                    if len(items) == 13:
+                        return items
+
+        items = asyncio.run(collect())
+        self.assertEqual(items[10], None, "loop marker after the 10 frames of a 1 s clip")
+        self.assertEqual(decode(items[0]).shape, (180, 320, 3))
+        self.assertEqual(source.name, "video:clip")
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.videos = self.directory / "videos"
 
-    def client(self, source=None, start_monitor=False):
-        app = create_app(source=source or FakeTank(), data_dir=self.directory,
-                         default_settings=default_settings(), start_monitor=start_monitor)
+    def client(self, start_monitor=False, fake=True, preferred="fake"):
+        catalog = Catalog(self.videos, camera=False, fake=fake)
+        app = create_app(catalog=catalog, data_root=self.directory, preferred=preferred, start_monitor=start_monitor)
         return self.enterContext(TestClient(app))
 
     def test_live_websocket_streams_state_then_frame(self):
@@ -204,7 +253,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(state["source"], "fake")
             self.assertEqual(state["tracking"]["expected"], 2)
             frame = socket.receive_bytes()
-            self.assertTrue(frame.startswith(b"\xff\xd8"))
+            self.assertTrue(frame.startswith(bytes((0xFF, 0xD8))))
         self.assertEqual(client.get("/api/frame.jpg").headers["content-type"], "image/jpeg")
 
     def test_feed_settings_history_and_demo(self):
@@ -222,8 +271,8 @@ class ApiTests(unittest.TestCase):
         moved = {**settings, "calibration": {**settings["calibration"], "tank_width_cm": 45}}
         self.assertEqual(client.put("/api/settings", json=moved).status_code, 200)
         self.assertEqual(client.get("/api/state").json()["calibration"]["tank_width_cm"], 45)
-        self.assertEqual(Settings.model_validate_json((self.directory / "settings.json").read_text()).calibration
-                         .tank_width_cm, 45)
+        saved = self.directory / "sources" / "fake" / "settings.json"
+        self.assertEqual(Settings.model_validate_json(saved.read_text()).calibration.tank_width_cm, 45)
 
         history = client.get("/api/history?range=1h").json()
         self.assertEqual(history["step_ms"], 60_000)
@@ -234,14 +283,46 @@ class ApiTests(unittest.TestCase):
         state = client.post("/api/demo", json={"action": "sluggish"}).json()
         self.assertTrue(state["demo"]["sluggish"])
 
-    def test_demo_needs_fake_camera(self):
-        class Camera:
-            name = "picamera"
+    def test_upload_video_switch_sources_and_remember_choice(self):
+        client = self.client(start_monitor=True)
+        path = self.directory / "clip.avi"
+        write_test_video(path)
+        self.assertEqual(client.put("/api/videos/..%2Fevil.avi", content=b"x").status_code, 404)
+        self.assertEqual(client.put("/api/videos/clip.exe", content=b"x").status_code, 422)
+        sources = client.put("/api/videos/tank test.avi", content=path.read_bytes()).json()
+        self.assertEqual([item["id"] for item in sources], ["video:tank test", "fake"])
+        self.assertEqual(client.put("/api/source", json={"id": "picamera"}).status_code, 404)
 
-        client = self.client(source=Camera())
+        state = client.put("/api/source", json={"id": "video:tank test"}).json()
+        self.assertEqual(state["source"], "video:tank test")
+        self.assertIsNone(state["demo"])
         self.assertEqual(client.post("/api/demo", json={"action": "dark"}).status_code, 409)
-        self.assertEqual(client.get("/api/state").json()["camera"]["status"], "connecting")
+        with client.websocket_connect("/ws/live") as socket:
+            for _ in range(20):
+                state = socket.receive_json()
+                if state["camera"]["status"] == "live" and state["tracking"]["fish"]:
+                    break
+            self.assertEqual(state["source"], "video:tank test")
+            self.assertEqual(state["camera"]["width"], 640)
+            self.assertEqual(len(state["tracking"]["fish"]), 1, "video defaults to one fish")
+        self.assertEqual((self.directory / "active-source.txt").read_text(), "video:tank test")
+        self.assertTrue((self.directory / "sources" / "video-tank-test" / "aquarium.sqlite3").is_file())
         self.assertEqual(client.get("/api/snapshots/..%2Fsettings.json").status_code, 404)
+
+    def test_clock_sync_only_when_clocks_disagree(self):
+        client = self.client()
+        now = client.get("/api/state").json()["now_ms"]
+        self.assertEqual(client.post("/api/clock", json={"now_ms": now + 5000}).json()["adjusted"], False)
+        with patch("aquarium.main.set_system_clock", return_value=None) as setter:
+            result = client.post("/api/clock", json={"now_ms": now + 86_400_000}).json()
+        self.assertTrue(result["adjusted"])
+        setter.assert_awaited_once()
+        self.assertEqual(client.get("/api/events").json()[0]["kind"], "clock")
+
+    def test_falls_back_when_preferred_camera_is_missing(self):
+        client = self.client(fake=True, preferred="picamera")
+        self.assertEqual(client.get("/api/state").json()["source"], "fake")
+        self.assertEqual(client.get("/api/sources").json()[0]["active"], True)
 
 
 if __name__ == "__main__":

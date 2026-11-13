@@ -1,11 +1,14 @@
 """HTTP/WebSocket API and dashboard for the aquarium monitor.
 
-Run a single Uvicorn worker: the monitor task owns the camera.
+Run a single Uvicorn worker: the active monitor owns the camera.
 
 Environment:
-  AQUARIUM_SOURCE       "picamera" (Pi Camera 3) or "fake" (rendered test tank, default)
-  AQUARIUM_DATA         data directory; defaults to .data/<source>
-  AQUARIUM_RPICAM_ARGS  extra rpicam-vid arguments, e.g. "--lens-position 3"
+  AQUARIUM_SOURCE       preferred source on first start: "picamera", "fake" or "video:<file stem>"
+                        (afterwards the source picked in the dashboard is remembered)
+  AQUARIUM_DATA         data directory, default .data
+  AQUARIUM_VIDEOS       folder of test videos played as a camera, default .data/videos
+  AQUARIUM_CAMERA       "1" / "0" to force the Pi camera option on or off (default: if rpicam-vid exists)
+  AQUARIUM_RPICAM_ARGS  extra rpicam-vid arguments, e.g. "--autofocus-mode manual --lens-position 3"
 """
 
 import asyncio
@@ -19,17 +22,47 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .devices import DeviceError, Feeder, ManualFeeder
+from .devices import DeviceError, Feeder
+from .hub import Catalog, Hub
 from .monitor import Monitor
-from .settings import Model, Settings, SettingsStore
-from .sources import FrameSource
-from .store import Store
+from .settings import Model, Settings
+from .sources import VIDEO_SUFFIXES
 
 ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / "frontend" / "dist"
 SNAPSHOT_NAME = re.compile(r"^\d+-[a-z_]+\.jpg$")
+VIDEO_NAME = re.compile(r"^[\w][\w .()-]{0,80}$")
+MAX_UPLOAD_BYTES = 300 * 1024 * 1024
 RANGES = {"1h": (3600, 60), "24h": (86_400, 600), "7d": (7 * 86_400, 3600), "30d": (30 * 86_400, 10_800)}
 STATE_INTERVAL_S = 0.5
+
+
+class SourceChoice(Model):
+    id: str
+
+
+class ClockSync(Model):
+    now_ms: int
+
+
+CLOCK_TOLERANCE_MS = 30_000
+
+
+async def set_system_clock(now_ms: int) -> str | None:
+    """Set the Pi's clock (no battery clock, often no NTP over USB). Returns an error message or None."""
+    if os.name != "posix":
+        return "只能在 Raspberry Pi 上調整系統時間"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "date", "-u", "-s", f"@{now_ms / 1000:.3f}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, error = await asyncio.wait_for(process.communicate(), 10)
+    except (OSError, TimeoutError) as error:
+        return f"無法執行 date：{error}"
+    if process.returncode:
+        return "沒有權限調整時間（需要免密碼 sudo）：" + error.decode(errors="replace").strip()
+    return None
 
 
 class DemoAction(Model):
@@ -37,36 +70,26 @@ class DemoAction(Model):
 
 
 def create_app(
-    *, source: FrameSource, data_dir: Path, feeder: Feeder | None = None,
-    default_settings: Settings | None = None, seed=None, start_monitor: bool = True,
+    *, catalog: Catalog, data_root: Path, preferred: str | None = None,
+    feeder: Feeder | None = None, start_monitor: bool = True,
 ) -> FastAPI:
-    """`seed(store, now_s, settings)` fills a new database (fake mode only)."""
+    hub = Hub(catalog, data_root, feeder, start_monitor)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        store = Store(data_dir / "aquarium.sqlite3")
-        settings = SettingsStore(data_dir / "settings.json", default_settings or Settings())
-        monitor = Monitor(
-            source, store, settings, feeder or ManualFeeder(getattr(source, "feed", None)), data_dir / "snapshots",
-        )
-        if seed is not None:
-            seed(store, monitor.clock() // 1000, settings.value)
-        app.state.monitor = monitor
-        task = asyncio.create_task(monitor.run()) if start_monitor else None
+        await hub.activate(hub.initial(preferred))
         try:
             yield
         finally:
-            if task is not None:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            monitor.close()
-            store.close()
+            await hub.stop()
 
-    app = FastAPI(title="Aquarium Lab", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Aquarium Lab", version="0.3.0", lifespan=lifespan)
+    app.state.hub = hub
 
     def monitor() -> Monitor:
-        return app.state.monitor
+        if hub.monitor is None:
+            raise HTTPException(503, "影像來源切換中")
+        return hub.monitor
 
     async def same_origin(request: Request):
         origin = request.headers.get("origin")
@@ -78,6 +101,55 @@ def create_app(
     @app.get("/api/state")
     async def state():
         return monitor().state()
+
+    @app.post("/api/clock", dependencies=write)
+    async def sync_clock(body: ClockSync):
+        """Set the system clock from the dashboard computer's time when they disagree."""
+        current = monitor()
+        skew = body.now_ms - current.clock()
+        if abs(skew) <= CLOCK_TOLERANCE_MS:
+            return {"adjusted": False, "skew_ms": skew}
+        problem = await set_system_clock(body.now_ms)
+        if problem:
+            raise HTTPException(409, problem)
+        current.clock_changed()
+        current.store.add_event(current.clock(), "clock", {"skew_ms": skew})
+        return {"adjusted": True, "skew_ms": skew}
+
+    @app.get("/api/sources")
+    async def sources():
+        return hub.sources()
+
+    @app.put("/api/source", dependencies=write)
+    async def choose_source(choice: SourceChoice):
+        try:
+            await hub.activate(choice.id)
+        except KeyError as error:
+            raise HTTPException(404, "找不到這個影像來源") from error
+        return monitor().state()
+
+    @app.put("/api/videos/{name}", dependencies=write)
+    async def upload_video(name: str, request: Request):
+        """Raw request body upload; the video then appears as a source."""
+        path = catalog.videos / name
+        if not VIDEO_NAME.match(name) or path.suffix.lower() not in VIDEO_SUFFIXES:
+            raise HTTPException(422, f"檔名需為英數字，副檔名為 {'、'.join(sorted(VIDEO_SUFFIXES))}")
+        catalog.videos.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".part")
+        size = 0
+        try:
+            with partial.open("wb") as file:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, "影片超過 300 MB")
+                    file.write(chunk)
+            if not size:
+                raise HTTPException(422, "沒有收到影片內容")
+            partial.replace(path)
+        finally:
+            partial.unlink(missing_ok=True)
+        return hub.sources()
 
     @app.get("/api/frame.jpg", responses={200: {"content": {"image/jpeg": {}}}}, response_class=Response)
     async def frame():
@@ -145,7 +217,7 @@ def create_app(
 
     @app.get("/api/snapshots/{name}", include_in_schema=False)
     async def snapshot(name: str):
-        path = data_dir / "snapshots" / name
+        path = monitor().snapshots / name
         if not SNAPSHOT_NAME.match(name) or not path.is_file():
             raise HTTPException(404, "找不到快照")
         return FileResponse(path, media_type="image/jpeg")
@@ -154,12 +226,17 @@ def create_app(
     async def live(socket: WebSocket, video: bool = True):
         """JSON state messages, each followed by the JPEG it describes when video is on."""
         await socket.accept()
-        current = monitor()
+        current = None
         sent_version = -1
         loop = asyncio.get_running_loop()
         last_state = 0.0
         try:
             while True:
+                if hub.monitor is not current:
+                    current, sent_version = hub.monitor, -1
+                if current is None:
+                    await asyncio.sleep(STATE_INTERVAL_S)
+                    continue
                 event = current.frame_event
                 with suppress(TimeoutError):
                     await asyncio.wait_for(event.wait(), STATE_INTERVAL_S)
@@ -187,20 +264,13 @@ def create_app(
 
 
 def app_from_environment() -> FastAPI:
-    kind = os.getenv("AQUARIUM_SOURCE", "fake")
-    data_dir = Path(os.getenv("AQUARIUM_DATA", str(ROOT / ".data" / kind)))
-    if kind == "picamera":
-        from .sources import PiCamera
-
-        return create_app(source=PiCamera(extra_args=os.getenv("AQUARIUM_RPICAM_ARGS", "")), data_dir=data_dir)
-    if kind == "fake":
-        from .fake import FakeTank, default_settings, seed_history
-
-        return create_app(
-            source=FakeTank(), data_dir=data_dir, default_settings=default_settings(),
-            seed=lambda store, now_s, settings: seed_history(store, now_s, settings.fish_count),
-        )
-    raise ValueError("AQUARIUM_SOURCE must be picamera or fake")
+    data_root = Path(os.getenv("AQUARIUM_DATA", str(ROOT / ".data")))
+    camera = {"1": True, "0": False}.get(os.getenv("AQUARIUM_CAMERA", ""))
+    catalog = Catalog(
+        Path(os.getenv("AQUARIUM_VIDEOS", str(data_root / "videos"))), camera,
+        os.getenv("AQUARIUM_RPICAM_ARGS", ""),
+    )
+    return create_app(catalog=catalog, data_root=data_root, preferred=os.getenv("AQUARIUM_SOURCE", "picamera"))
 
 
 app = app_from_environment()

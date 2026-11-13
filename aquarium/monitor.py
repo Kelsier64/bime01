@@ -36,21 +36,25 @@ def now_ms() -> int:
 
 class Monitor:
     def __init__(self, source: FrameSource, store: Store, settings: SettingsStore, feeder: Feeder,
-                 snapshots: Path, clock=now_ms):
+                 snapshots: Path, clock=now_ms, monotonic=time.monotonic):
         self.source = source
         self.store = store
         self.settings = settings
         self.feeder = feeder
         self.snapshots = snapshots
+        # Wall clock for timestamps; monotonic time for "how long since the last frame",
+        # so correcting the Pi's clock (it has no battery clock) cannot fake a camera outage.
         self.clock = clock
-        self.started_ms = clock()
+        self.monotonic = monotonic
+        self.started_mono = monotonic()
+        self.frame_mono: float | None = None
         self.camera_error: str | None = None
         self.frame: bytes | None = None
         self.frame_ms: int | None = None
         self.frame_size: tuple[int, int] | None = None
         self.frame_version = 0
         self.frame_event = asyncio.Event()
-        self.frame_times: deque[int] = deque(maxlen=30)
+        self.frame_times: deque[float] = deque(maxlen=30)
         self.lit: bool | None = None
         self.level: float | None = None
         self.tracking: dict = {"stage": "waiting", "tracks": []}
@@ -62,6 +66,11 @@ class Monitor:
         last_feed = store.latest_event("feed")
         self.last_feed_ms = last_feed["ts_ms"] if last_feed else None
         self.configure()
+
+    def clock_changed(self):
+        """The system clock was corrected: close the current second/minute under the old time."""
+        self.after_minutes(self.recorder.idle(2**62))
+        self.last_feed_ms = None if self.last_feed_ms is None else min(self.last_feed_ms, self.clock())
 
     def configure(self):
         """Apply the current settings (calibration, fish count, detection method)."""
@@ -108,7 +117,8 @@ class Monitor:
         self.frame, self.frame_ms = jpeg, ts_ms
         self.frame_size = (analysis["width"], analysis["height"])
         self.frame_version += 1
-        self.frame_times.append(ts_ms)
+        self.frame_mono = self.monotonic()
+        self.frame_times.append(self.frame_mono)
         self.camera_error = None
         self.alerts.clear("camera_offline", ts_ms)
         self.lit, self.level = analysis["lit"], analysis["level"]
@@ -122,6 +132,12 @@ class Monitor:
         self.after_minutes(closed)
         event, self.frame_event = self.frame_event, asyncio.Event()
         event.set()
+
+    def discontinuity(self):
+        """The picture jumped (a looping video restarted): drop tracks and motion history."""
+        if self.tracker is not None:
+            self.tracker.reset_tracks()
+        self.recorder.reset_motion()
 
     def process(self, jpeg: bytes, ts_ms: int | None = None):
         """Synchronous path, used by tests."""
@@ -143,6 +159,9 @@ class Monitor:
                 async with self.source.frames() as frames:
                     while True:
                         jpeg = await asyncio.wait_for(anext(frames), FRAME_STALL_S)
+                        if jpeg is None:
+                            self.discontinuity()
+                            continue
                         analysis = await asyncio.to_thread(self.analyze, jpeg)
                         self.apply(self.clock(), jpeg, analysis)
                         delay = 1
@@ -159,10 +178,18 @@ class Monitor:
     async def watchdog_loop(self):
         while True:
             await asyncio.sleep(1)
-            now = self.clock()
-            self.alerts.check_camera(now, self.frame_ms, self.started_ms, self.settings.value.camera_timeout_s)
-            if self.frame_ms is None or now - self.frame_ms > 2000:
-                self.after_minutes(self.recorder.idle(now))
+            self.watchdog_tick()
+
+    def silence_s(self) -> float:
+        """Seconds since the last frame (or since start if none yet)."""
+        return self.monotonic() - (self.frame_mono if self.frame_mono is not None else self.started_mono)
+
+    def watchdog_tick(self):
+        now = self.clock()
+        silence = self.silence_s()
+        self.alerts.check_camera(now, silence, self.settings.value.camera_timeout_s)
+        if silence > 2:
+            self.after_minutes(self.recorder.idle(now))
 
     async def housekeeping_loop(self):
         while True:
@@ -178,7 +205,7 @@ class Monitor:
     # actions ----------------------------------------------------------------
 
     def save_snapshot(self, label: str) -> str | None:
-        if self.frame is None or self.frame_ms is None or self.clock() - self.frame_ms > LIVE_WITHIN_MS:
+        if self.frame is None or self.frame_ms is None or self.silence_s() * 1000 > LIVE_WITHIN_MS:
             return None
         self.snapshots.mkdir(parents=True, exist_ok=True)
         name = f"{self.frame_ms}-{label}.jpg"
@@ -209,8 +236,8 @@ class Monitor:
 
     # state ------------------------------------------------------------------
 
-    def camera_status(self, now: int) -> str:
-        if self.frame_ms is not None and now - self.frame_ms <= LIVE_WITHIN_MS:
+    def camera_status(self) -> str:
+        if self.frame_mono is not None and self.silence_s() * 1000 <= LIVE_WITHIN_MS:
             return "live"
         return "connecting" if self.frame_ms is None and "camera_offline" not in self.alerts.active else "offline"
 
@@ -218,8 +245,8 @@ class Monitor:
         now = self.clock()
         settings = self.settings.value
         times = self.frame_times
-        fps = (len(times) - 1) * 1000 / (times[-1] - times[0]) if len(times) > 1 and times[-1] > times[0] else None
-        status = self.camera_status(now)
+        fps = (len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 and times[-1] > times[0] else None
+        status = self.camera_status()
         demo = getattr(self.source, "demo_state", None)
         return {
             "now_ms": now,

@@ -3,6 +3,15 @@ import { createTrendChart, drawHeatmap, formatDateTime, formatValue, METRICS } f
 import { createLiveView } from "./live.js";
 
 const $ = (id) => document.getElementById(id);
+// Compare with what we last rendered, not innerHTML: browsers re-serialise markup
+// (e.g. `data-x` becomes `data-x=""`), which would rebuild the DOM on every update
+// and swallow clicks on buttons inside it.
+const renderedHtml = new WeakMap();
+const setHtml = (element, html) => {
+  if (renderedHtml.get(element) === html) return;
+  renderedHtml.set(element, html);
+  element.innerHTML = html;
+};
 const setText = (element, value) => {
   const text = String(value);
   if (element.textContent !== text) element.textContent = text;
@@ -61,6 +70,17 @@ function setOnline(value) {
 
 function acceptState(next) {
   const previous = state;
+  if (previous && previous.source !== next.source) {
+    live.reset();
+    if (calibrating) endCalibration();
+    history = null;
+    feeding = null;
+    renderHistory();
+    renderFeeding();
+    void loadHistory();
+    void loadDay();
+    void loadSources();
+  }
   state = next;
   live.setState(next);
   renderLive();
@@ -77,7 +97,7 @@ function acceptState(next) {
 
 function renderLive() {
   const { camera, light, tracking, calibration, source, demo } = state;
-  setText($("source"), source === "fake" ? "假相機（模擬）" : "Pi Camera 3");
+  setText($("source"), sourceLabel(source));
   const cameraChip = $("camera-chip");
   cameraChip.dataset.tone = camera.status === "live" ? "ok" : camera.status === "offline" ? "bad" : "";
   setText(cameraChip, camera.status === "live" ? `相機 ${camera.fps ?? "—"} fps` : camera.status === "offline" ? "相機離線" : "相機連線中");
@@ -97,7 +117,7 @@ function renderLive() {
     return `<li><strong>#${fish.id}</strong><span>${speed}</span><span>${position}</span></li>`;
   }).join("");
   const html = items || `<li class="muted">${tracking.stage === "dark" ? "關燈中，暫停追蹤" : "畫面中沒有偵測到魚"}</li>`;
-  if (list.innerHTML !== html) list.innerHTML = html;
+  setHtml(list, html);
 
   $("calibration-notice").hidden = Boolean(calibration) || calibrating;
   $("demo").hidden = !demo;
@@ -110,16 +130,126 @@ function renderLive() {
   else setText($("feed"), "立即餵食");
 }
 
+// sources ----------------------------------------------------------------------
+
+let sources = [];
+function sourceLabel(id) {
+  return sources.find((item) => item.id === id)?.label ?? (id === "picamera" ? "Pi Camera 3" : id);
+}
+
+function renderSources() {
+  const select = $("source-select");
+  const keep = select.value;
+  const html = sources.map((item) =>
+    `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}${item.active ? "（使用中）" : ""}</option>`).join("");
+  setHtml(select, html);
+  const active = sources.find((item) => item.active);
+  select.value = sources.some((item) => item.id === keep) && keep !== "" ? keep : active?.id ?? "";
+  updateSourceButton();
+}
+
+function updateSourceButton() {
+  const chosen = sources.find((item) => item.id === $("source-select").value);
+  const button = $("source-apply");
+  button.disabled = !chosen || chosen.active;
+  setText(button, chosen?.kind === "camera" ? "啟動相機" : chosen?.kind === "video" ? "播放影片" : "切換");
+  setText($("source-note"), chosen?.note ?? (chosen?.kind === "camera" ? "Pi Zero 2 W 上的 Camera 3，開始後會持續在背景記錄" : ""));
+}
+
+async function loadSources() {
+  try {
+    sources = await getJson("/api/sources");
+    renderSources();
+    if (state) setText($("source"), sourceLabel(state.source));
+  } catch { /* retry on next switch */ }
+}
+
+$("source-select").addEventListener("change", updateSourceButton);
+
+$("alerts").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-sync-clock]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await getJson("/api/clock", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ now_ms: Date.now() }),
+    });
+    button.textContent = "已校正";
+    void loadEvents();
+    void loadHistory();
+    void loadDay();
+    void loadFeeding();
+  } catch (error) {
+    button.textContent = error.message;
+  }
+});
+$("source-apply").addEventListener("click", async () => {
+  const feedback = $("source-feedback");
+  const id = $("source-select").value;
+  $("source-apply").disabled = true;
+  feedback.dataset.error = "false";
+  feedback.textContent = "切換中…";
+  try {
+    acceptState(await getJson("/api/source", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }),
+    }));
+    await loadSources();
+    feedback.textContent = `已切換到 ${sourceLabel(id)}`;
+  } catch (error) {
+    feedback.dataset.error = "true";
+    feedback.textContent = error.message;
+    updateSourceButton();
+  }
+});
+
+$("video-upload").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  const feedback = $("source-feedback");
+  const name = file.name.replace(/[^\w .()-]/g, "-").replace(/^[^\w]+/, "");
+  feedback.dataset.error = "false";
+  feedback.textContent = `正在上傳 ${name}（${(file.size / 1048576).toFixed(1)} MB）…`;
+  try {
+    sources = await getJson(`/api/videos/${encodeURIComponent(name)}`, { method: "PUT", body: file });
+    renderSources();
+    const added = sources.find((item) => item.kind === "video" && item.label.endsWith(name));
+    if (added) $("source-select").value = added.id;
+    updateSourceButton();
+    feedback.textContent = "上傳完成，按「播放影片」開始計算";
+  } catch (error) {
+    feedback.dataset.error = "true";
+    feedback.textContent = error.message;
+  }
+});
+
+function clockSkewMs() {
+  return state ? state.now_ms - Date.now() : 0;
+}
+
+function describeSkew(ms) {
+  const seconds = Math.abs(ms) / 1000;
+  const amount = seconds >= 86_400 ? `${(seconds / 86_400).toFixed(1)} 天`
+    : seconds >= 3600 ? `${(seconds / 3600).toFixed(1)} 小時` : `${Math.round(seconds / 60)} 分鐘`;
+  return `${ms < 0 ? "慢" : "快"} ${amount}`;
+}
+
 function renderAlerts() {
   const container = $("alerts");
-  container.hidden = !state.alerts.length;
-  const html = state.alerts.map((alert) => `<div class="alert">
+  const skew = clockSkewMs();
+  const clock = online && Math.abs(skew) > 120_000
+    ? `<div class="alert"><strong>時鐘不準</strong>
+        <span>Pi 的時間比這台電腦${describeSkew(skew)}，歷史紀錄的時間會錯（Pi 沒有電池時鐘，重開機後常會這樣）。</span>
+        <button type="button" class="ghost" data-sync-clock>用這台電腦的時間校正</button></div>`
+    : "";
+  container.hidden = !state.alerts.length && !clock;
+  const html = clock + state.alerts.map((alert) => `<div class="alert">
       <strong>${ALERT_NAMES[alert.kind] ?? alert.kind}</strong>
       <span>${escapeHtml(alert.message)}</span>
       <time>自 ${formatDateTime(alert.since_ms)}</time>
       ${alert.snapshot ? `<a href="/api/snapshots/${alert.snapshot}" target="_blank" rel="noopener">快照</a>` : ""}
     </div>`).join("");
-  if (container.innerHTML !== html) container.innerHTML = html;
+  setHtml(container, html);
 }
 
 function renderHistory() {
@@ -161,6 +291,7 @@ const EVENT_LABELS = {
   feed: (event) => event.detail.origin === "manual" ? "手動餵食" : "餵食器餵食",
   alert: (event) => `警示：${ALERT_NAMES[event.detail.alert] ?? event.detail.alert}`,
   alert_cleared: (event) => `解除：${ALERT_NAMES[event.detail.alert] ?? event.detail.alert}（${Math.round(event.detail.duration_s / 60)} 分鐘）`,
+  clock: (event) => `校正 Pi 時鐘（原本${describeSkew(-event.detail.skew_ms)}）`,
   calibration: (event) => `重新校正（${event.detail.tank_width_cm ?? "—"} × ${event.detail.tank_height_cm ?? "—"} cm）`,
 };
 
@@ -384,6 +515,7 @@ form.addEventListener("submit", async (event) => {
 
 renderHistory();
 renderFeeding();
+void loadSources();
 connect();
 void loadHistory();
 void loadDay();

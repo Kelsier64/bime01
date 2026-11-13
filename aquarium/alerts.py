@@ -30,9 +30,8 @@ class Alerts:
                 "alert": kind, "duration_s": round((ts_ms - alert["since_ms"]) / 1000),
             })
 
-    def check_camera(self, now_ms, last_frame_ms, started_ms, timeout_s):
-        reference = last_frame_ms if last_frame_ms is not None else started_ms
-        if now_ms - reference > timeout_s * 1000:
+    def check_camera(self, now_ms, silence_s, timeout_s):
+        if silence_s > timeout_s:
             self.raise_alert("camera_offline", f"相機超過 {timeout_s} 秒沒有送出畫面", now_ms, snapshot=False)
 
     def check_activity(self, now_s: int, settings: Settings):

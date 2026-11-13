@@ -60,6 +60,17 @@
         </section>
 
         <div class="side">
+          <section class="panel" aria-labelledby="source-title">
+            <div class="panel-header"><div><h2 id="source-title">影像來源</h2><p>實機相機、測試影片或假相機，計算流程相同</p></div></div>
+            <div class="source-row">
+              <select id="source-select" aria-label="影像來源"></select>
+              <button type="button" class="primary" id="source-apply" disabled>切換</button>
+            </div>
+            <p class="source-note muted" id="source-note"></p>
+            <label class="upload">上傳測試影片…<input type="file" id="video-upload" accept="video/*,.mkv,.webm"></label>
+            <p class="feedback" id="source-feedback" role="status"></p>
+          </section>
+
           <section class="panel" aria-labelledby="today-title">
             <div class="panel-header"><div><h2 id="today-title">過去 24 小時</h2><p>只計入有光照的時段</p></div></div>
             <div class="stats">

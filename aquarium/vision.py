@@ -10,7 +10,8 @@ from math import dist
 import cv2
 import numpy as np
 
-GOLD_LOW = (4, 85, 45)
+# Goldfish measure around S 225 / V 120-225; brown wood and furniture around S 110 / V 60.
+GOLD_LOW = (4, 130, 70)
 GOLD_HIGH = (40, 255, 255)
 TRAIL_POINTS = 20
 
@@ -147,6 +148,9 @@ class FishTracker:
         self.frame = 0
         self.tracker = Tracker(fish_count, max_gap=20, gate=frame_width * 0.08)
         self.background = BackgroundDetector() if method == "background" else None
+
+    def reset_tracks(self):
+        self.tracker.tracks = []
 
     def process(self, image: np.ndarray, gray: np.ndarray, roi: np.ndarray | None) -> dict:
         self.frame += 1
